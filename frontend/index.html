@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Resource Manager & Application Isolation System — OS Course Project</title>
+    <meta name="description" content="Intelligent Operating System Resource Management, Native Windows Job Object Isolation, Deadlock Wait-For Graph, Banker's Algorithm, and OS Scheduler Simulator.">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+    <div class="app-container">
+        <!-- ── Top Header ──────────────────────────────────────────────────── -->
+        <header class="app-header">
+            <div class="header-brand">
+                <div class="header-logo">⚡</div>
+                <div>
+                    <h1 class="header-title">Smart Resource Manager &amp; Application Isolation System</h1>
+                    <div class="header-subtitle">OS Kernel Job Objects &bull; Heuristic Policy Engine &bull; Concurrency &bull; Algorithmic Scheduling</div>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator">
+                    <span id="wsStatusDot" class="status-dot offline"></span>
+                    <span id="wsStatusText">Connecting...</span>
+                </div>
+                <div class="status-indicator" style="font-family: var(--font-mono); font-size: 0.75rem;">
+                    <span id="systemUptime">Uptime: --</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- ── Navigation Tabs ─────────────────────────────────────────────── -->
+        <nav class="nav-tabs" role="tablist">
+            <button class="nav-tab active" data-tab="telemetry" id="tabBtnTelemetry" role="tab" aria-selected="true">
+                <span class="nav-tab-icon">📊</span>Host Telemetry &amp; Process Matrix
+            </button>
+            <button class="nav-tab" data-tab="isolation" id="tabBtnIsolation" role="tab" aria-selected="false">
+                <span class="nav-tab-icon">🛡️</span>Job Object Sandbox Manager
+            </button>
+            <button class="nav-tab" data-tab="deadlock" id="tabBtnDeadlock" role="tab" aria-selected="false">
+                <span class="nav-tab-icon">🔒</span>Deadlock &amp; Concurrency Engine
+            </button>
+            <button class="nav-tab" data-tab="simulator" id="tabBtnSimulator" role="tab" aria-selected="false">
+                <span class="nav-tab-icon">⚙️</span>OS Algorithm Simulator
+            </button>
+            <button class="nav-tab" data-tab="workloads" id="tabBtnWorkloads" role="tab" aria-selected="false">
+                <span class="nav-tab-icon">🚀</span>Synthetic Workload Suite
+            </button>
+        </nav>
+
+        <!-- ── Main Dashboard Content ──────────────────────────────────────── -->
+        <main class="main-content">
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <!-- TAB 1: HOST TELEMETRY & PROCESS MATRIX                         -->
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <section id="panelTelemetry" class="tab-panel active" role="tabpanel">
+                <!-- Stat Cards Row -->
+                <div class="grid-4" style="margin-bottom: var(--space-lg);">
+                    <div class="stat-card cpu">
+                        <div class="stat-label">CPU Utilization</div>
+                        <div class="stat-value cpu-color" id="statCpuPercent">0.0%</div>
+                        <div class="stat-sub" id="statCpuCores">-- Cores | -- Threads</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill cpu" id="barCpuPercent" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                    <div class="stat-card memory">
+                        <div class="stat-label">Physical Memory (RAM)</div>
+                        <div class="stat-value mem-color" id="statMemPercent">0.0%</div>
+                        <div class="stat-sub" id="statMemDetail">-- / -- GB</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill memory" id="barMemPercent" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                    <div class="stat-card process">
+                        <div class="stat-label">Processes &amp; Threads</div>
+                        <div class="stat-value proc-color" id="statProcCount">0</div>
+                        <div class="stat-sub" id="statThreadCount">-- Active Threads</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill success" id="barProcCount" style="width: 100%;"></div>
+                        </div>
+                    </div>
+                    <div class="stat-card thread">
+                        <div class="stat-label">Policy Decisions</div>
+                        <div class="stat-value thread-color" id="statDecisionsCount">0</div>
+                        <div class="stat-sub" id="statPolicyDetail">Active Heuristic Mitigation</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="background: var(--gradient-danger); width: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Performance History Charts -->
+                <div class="grid-2" style="margin-bottom: var(--space-lg);">
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">📈</span> CPU Load History (Last 60s)</div>
+                            <span class="card-badge" id="chartCpuBadge">Live Feed</span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="cpuChartCanvas"></canvas>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">📊</span> Memory Allocation History (Last 60s)</div>
+                            <span class="card-badge" id="chartMemBadge">Live Feed</span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="memChartCanvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Process Matrix & Rationale Feed Layout -->
+                <div class="grid-3">
+                    <!-- Left: Process Matrix (2 cols) -->
+                    <div class="card" style="grid-column: span 2;">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <span class="icon">🗂️</span> Process Control Matrix
+                                <span class="card-badge" id="procTableCountBadge">0 procs</span>
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-sm" id="btnRefreshProcesses" title="Force Refresh">🔄 Refresh</button>
+                                <button class="btn btn-sm" id="btnPauseTelemetry" title="Pause / Resume stream">⏸️ Pause</button>
+                            </div>
+                        </div>
+
+                        <!-- Filter Controls -->
+                        <div class="form-row" style="margin-bottom: var(--space-md);">
+                            <div class="form-group" style="flex: 2;">
+                                <label class="form-label" for="searchProcessInput">Search Process / PID</label>
+                                <input type="text" id="searchProcessInput" class="form-input" placeholder="Type process name or PID...">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="filterCategorySelect">Category</label>
+                                <select id="filterCategorySelect" class="form-select">
+                                    <option value="all">All Categories</option>
+                                    <option value="interactive">Interactive / UI</option>
+                                    <option value="background">Background Service</option>
+                                    <option value="system">System / Kernel</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="sortProcessSelect">Sort By</label>
+                                <select id="sortProcessSelect" class="form-select">
+                                    <option value="cpu">Highest CPU %</option>
+                                    <option value="memory">Highest RAM (MB)</option>
+                                    <option value="threads">Thread Count</option>
+                                    <option value="pid">PID</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Process Table -->
+                        <div class="data-table-wrapper process-table-container">
+                            <table class="data-table" id="processTable">
+                                <thead>
+                                    <tr>
+                                        <th>PID</th>
+                                        <th>Process Name</th>
+                                        <th>Category</th>
+                                        <th>Priority</th>
+                                        <th>CPU %</th>
+                                        <th>RAM (WS)</th>
+                                        <th>Threads</th>
+                                        <th>Job Sandbox</th>
+                                        <th>Quick Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="processTableBody">
+                                    <tr>
+                                        <td colspan="9" style="text-align: center; padding: var(--space-lg); color: var(--text-muted);">
+                                            Awaiting real-time telemetry stream from host kernel...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Right: Live Policy Decision Feed (1 col) -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <span class="icon">🧠</span> Heuristic Decision Feed
+                            </div>
+                            <span class="card-badge" id="activePolicyBadge">Autonomous</span>
+                        </div>
+                        <p style="font-size: 0.75rem; color: var(--text-tertiary); margin-bottom: var(--space-sm);">
+                            Transparent audit log of kernel-level mitigations, priority demotions, and working set trims.
+                        </p>
+                        <div class="decision-feed" id="decisionFeedContainer">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">🛡️</div>
+                                <div class="empty-state-text">No policy actions triggered yet. System running smoothly.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <!-- TAB 2: JOB OBJECT SANDBOX MANAGER                              -->
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <section id="panelIsolation" class="tab-panel" role="tabpanel">
+                <div class="grid-3" style="margin-bottom: var(--space-lg);">
+                    <!-- Sandbox Creation Form (1 col) -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">➕</span> Create Job Sandbox</div>
+                            <span class="card-badge">Win32 NT Kernel</span>
+                        </div>
+                        <form id="createSandboxForm" onsubmit="return false;">
+                            <div class="form-group" style="margin-bottom: var(--space-sm);">
+                                <label class="form-label" for="sbNameInput">Sandbox Identifier</label>
+                                <input type="text" id="sbNameInput" class="form-input" placeholder="e.g. untrusted_app_sandbox" required>
+                            </div>
+                            <div class="form-group" style="margin-bottom: var(--space-sm);">
+                                <label class="form-label" for="sbCpuCapInput">CPU Rate Hard Limit (%)</label>
+                                <input type="number" id="sbCpuCapInput" class="form-input" min="1" max="100" value="20" placeholder="e.g. 20 (max 20% CPU)">
+                            </div>
+                            <div class="form-group" style="margin-bottom: var(--space-sm);">
+                                <label class="form-label" for="sbMemoryCapInput">Hard Memory Limit (MB)</label>
+                                <input type="number" id="sbMemoryCapInput" class="form-input" min="10" max="8192" value="100" placeholder="e.g. 100 MB hard limit">
+                            </div>
+                            <div class="form-group" style="margin-bottom: var(--space-sm);">
+                                <label class="form-label" for="sbMaxProcsInput">Max Active Processes (Fork-bomb guard)</label>
+                                <input type="number" id="sbMaxProcsInput" class="form-input" min="1" max="50" value="5" placeholder="e.g. 5 processes">
+                            </div>
+                            <div class="form-group" style="margin-bottom: var(--space-md);">
+                                <label class="form-label" for="sbPrioritySelect">Enforced Priority Class</label>
+                                <select id="sbPrioritySelect" class="form-select">
+                                    <option value="IDLE_PRIORITY_CLASS">IDLE (Lowest CPU competition)</option>
+                                    <option value="BELOW_NORMAL_PRIORITY_CLASS" selected>BELOW NORMAL</option>
+                                    <option value="NORMAL_PRIORITY_CLASS">NORMAL</option>
+                                </select>
+                            </div>
+                            <button type="button" id="btnCreateSandbox" class="btn btn-primary" style="width: 100%;">
+                                🛡️ Instantiate Job Object
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Assign Process to Sandbox Quick Tool (2 cols) -->
+                    <div class="card" style="grid-column: span 2;">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">🔗</span> Attach Running Process to Sandbox</div>
+                            <span class="card-badge">AssignProcessToJobObject</span>
+                        </div>
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                            Windows NT Job Objects bind running processes into an isolated kernel management context. Once bound, all child processes spawned by the target inherit the strict CPU, RAM, and concurrency caps.
+                        </p>
+                        <div class="form-row" style="margin-bottom: var(--space-lg);">
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label" for="assignSelectSandbox">Target Job Object</label>
+                                <select id="assignSelectSandbox" class="form-select">
+                                    <option value="">-- Select Active Sandbox --</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label" for="assignPidInput">Process PID to Enclose</label>
+                                <input type="number" id="assignPidInput" class="form-input" placeholder="Enter running PID...">
+                            </div>
+                            <div class="form-group" style="flex: 0 0 auto;">
+                                <button type="button" id="btnAssignProcess" class="btn btn-success">
+                                    🔒 Enclose Process
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Active Sandboxes Grid -->
+                        <div class="card-title" style="margin-bottom: var(--space-sm);">
+                            <span class="icon">📦</span> Active Kernel Job Objects (<span id="activeSandboxCount">0</span>)
+                        </div>
+                        <div class="sandbox-grid" id="sandboxListContainer">
+                            <div class="empty-state" style="grid-column: 1 / -1;">
+                                <div class="empty-state-icon">🛡️</div>
+                                <div class="empty-state-text">No active Job Objects created yet. Use the form on the left or launch a sandboxed workload.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <!-- TAB 3: DEADLOCK & CONCURRENCY ENGINE                           -->
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <section id="panelDeadlock" class="tab-panel" role="tabpanel">
+                <div class="grid-2" style="margin-bottom: var(--space-lg);">
+                    <!-- Wait-For Graph (WFG) Interactive Canvas -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">🕸️</span> Wait-For Graph (WFG) Cycle Detection</div>
+                            <div class="btn-group">
+                                <select id="wfgScenarioSelect" class="form-select" style="font-size: 0.75rem; padding: 2px 6px;">
+                                    <option value="circular_wait">Scenario: Circular Wait Deadlock</option>
+                                    <option value="no_deadlock">Scenario: Safe Resource Flow</option>
+                                </select>
+                                <button class="btn btn-sm btn-primary" id="btnLoadWfgScenario">Load</button>
+                                <button class="btn btn-sm" id="btnDetectDeadlock">🔍 Detect</button>
+                            </div>
+                        </div>
+                        <p style="font-size: 0.75rem; color: var(--text-tertiary); margin-bottom: var(--space-sm);">
+                            Interactive visualization of Process-Resource dependencies. Cycles indicate circular wait condition (Coffman condition 4).
+                        </p>
+
+                        <div class="graph-canvas-container">
+                            <canvas id="wfgCanvas" width="600" height="360"></canvas>
+                            <div class="graph-legend">
+                                <div class="graph-legend-item">
+                                    <span class="graph-legend-dot" style="background: var(--accent-indigo);"></span> Process Node
+                                </div>
+                                <div class="graph-legend-item">
+                                    <span class="graph-legend-dot" style="background: var(--accent-cyan);"></span> Resource Node
+                                </div>
+                                <div class="graph-legend-item">
+                                    <span class="graph-legend-dot" style="background: var(--accent-rose);"></span> Deadlocked Cycle
+                                </div>
+                                <div class="graph-legend-item">
+                                    <span class="graph-legend-dot" style="background: var(--accent-amber);"></span> Recommended Victim
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Detection Result Box -->
+                        <div id="wfgResultBox" style="margin-top: var(--space-md); padding: var(--space-md); border-radius: var(--radius-md); background: var(--bg-glass); border: 1px solid var(--border-glass);">
+                            <div style="font-weight: 700; font-size: 0.85rem; margin-bottom: var(--space-xs);" id="wfgStatusTitle">
+                                Status: Ready for analysis
+                            </div>
+                            <div style="font-size: 0.78rem; color: var(--text-secondary);" id="wfgStatusDetail">
+                                Select a scenario and click "Detect" to run Tarjan's Cycle Detection and evaluate victim preemption cost.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Banker's Algorithm Safety & Avoidance Visualizer -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">⚖️</span> Banker's Algorithm (Deadlock Avoidance)</div>
+                            <div class="btn-group">
+                                <button class="btn btn-sm" id="btnBankerSafeDemo">Safe State Demo</button>
+                                <button class="btn btn-sm" id="btnBankerUnsafeDemo">Unsafe State Demo</button>
+                            </div>
+                        </div>
+                        <p style="font-size: 0.75rem; color: var(--text-tertiary); margin-bottom: var(--space-sm);">
+                            Dijkstra's Banker's Algorithm computes Need Matrix ($Need = Max - Allocation$) and executes safety tests using Available vector.
+                        </p>
+
+                        <!-- Matrices Display -->
+                        <div class="banker-matrix" style="margin-bottom: var(--space-md);" id="bankerMatrixContainer">
+                            <table id="bankerTable">
+                                <thead>
+                                    <tr>
+                                        <th>Process</th>
+                                        <th>Allocation (A B C)</th>
+                                        <th>Max Claim (A B C)</th>
+                                        <th>Need (A B C)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="bankerTableBody">
+                                    <tr>
+                                        <td colspan="4" style="text-align: center; color: var(--text-muted);">
+                                            Click Safe or Unsafe State Demo to load matrices.
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm);">
+                            <div style="font-family: var(--font-mono); font-size: 0.8rem;">
+                                Available Vector: <strong id="bankerAvailableVec" style="color: var(--accent-cyan);">[ -- ]</strong>
+                            </div>
+                            <button class="btn btn-sm btn-primary" id="btnRunBankerCheck">Run Safety Check</button>
+                        </div>
+
+                        <div id="bankerResultBox" class="banker-result" style="display: none;">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <!-- TAB 4: OS ALGORITHM SIMULATOR                                  -->
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <section id="panelSimulator" class="tab-panel" role="tabpanel">
+                <!-- Top Section: MLFQ Scheduler Visualizer -->
+                <div class="card" style="margin-bottom: var(--space-lg);">
+                    <div class="card-header">
+                        <div class="card-title"><span class="icon">⏱️</span> Multi-Level Feedback Queue (MLFQ) CPU Scheduler</div>
+                        <div class="btn-group">
+                            <button class="btn btn-sm btn-primary" id="btnRunMlfqDemo">▶️ Run MLFQ Simulation</button>
+                        </div>
+                    </div>
+                    <p style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                        Simulates a 3-tier feedback scheduler: <strong>Q0</strong> (RR Quantum=4ms, highest priority), <strong>Q1</strong> (RR Quantum=8ms), <strong>Q2</strong> (FCFS/RR Quantum=16ms). CPU-intensive tasks degrade downward; periodic global priority boosting rescues starved threads.
+                    </p>
+
+                    <!-- MLFQ Queues Visual View -->
+                    <div class="mlfq-queues" id="mlfqQueuesContainer">
+                        <div class="mlfq-queue" id="queue0">
+                            <div class="mlfq-queue-header">
+                                <span class="mlfq-queue-name" style="color: var(--accent-indigo);">Queue 0 (Highest Priority)</span>
+                                <span class="mlfq-queue-quantum">Time Quantum: 4ms &bull; Interactive</span>
+                            </div>
+                            <div class="mlfq-queue-procs" id="procsQ0">
+                                <span style="color: var(--text-muted); font-size: 0.75rem;">Idle</span>
+                            </div>
+                        </div>
+                        <div class="mlfq-queue" id="queue1">
+                            <div class="mlfq-queue-header">
+                                <span class="mlfq-queue-name" style="color: var(--accent-cyan);">Queue 1 (Medium Priority)</span>
+                                <span class="mlfq-queue-quantum">Time Quantum: 8ms &bull; Mixed Load</span>
+                            </div>
+                            <div class="mlfq-queue-procs" id="procsQ1">
+                                <span style="color: var(--text-muted); font-size: 0.75rem;">Idle</span>
+                            </div>
+                        </div>
+                        <div class="mlfq-queue" id="queue2">
+                            <div class="mlfq-queue-header">
+                                <span class="mlfq-queue-name" style="color: var(--accent-amber);">Queue 2 (Lowest Priority)</span>
+                                <span class="mlfq-queue-quantum">Time Quantum: 16ms &bull; CPU Bound</span>
+                            </div>
+                            <div class="mlfq-queue-procs" id="procsQ2">
+                                <span style="color: var(--text-muted); font-size: 0.75rem;">Idle</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Gantt Timeline -->
+                    <div style="margin-top: var(--space-lg);">
+                        <div class="card-title" style="font-size: 0.85rem; margin-bottom: var(--space-xs);">Execution Gantt Timeline</div>
+                        <div class="gantt-container" id="mlfqGanttContainer">
+                            <div style="color: var(--text-muted); font-size: 0.75rem; padding: var(--space-sm);">
+                                Click "Run MLFQ Simulation" to generate execution timeline.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- MLFQ Metrics Table -->
+                    <div style="margin-top: var(--space-md);" class="data-table-wrapper">
+                        <table class="data-table" id="mlfqMetricsTable">
+                            <thead>
+                                <tr>
+                                    <th>Process ID</th>
+                                    <th>Name</th>
+                                    <th>Burst Time</th>
+                                    <th>Completion Time</th>
+                                    <th>Turnaround Time</th>
+                                    <th>Waiting Time</th>
+                                </tr>
+                            </thead>
+                            <tbody id="mlfqMetricsBody">
+                                <tr>
+                                    <td colspan="6" style="text-align: center; color: var(--text-muted);">Awaiting simulation run.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Bottom Section: Virtual Memory Page Replacement Visualizer -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title"><span class="icon">📑</span> Virtual Memory Page Replacement Algorithm Suite</div>
+                        <div class="btn-group">
+                            <button class="btn btn-sm btn-primary" id="btnRunPageSim">Compare FIFO vs LRU vs Clock</button>
+                        </div>
+                    </div>
+                    <p style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                        Evaluates page fault rates under identical memory pressure (3 frames) across the standard operating systems reference sequence.
+                    </p>
+
+                    <!-- Reference String Display -->
+                    <div class="form-group" style="margin-bottom: var(--space-md);">
+                        <label class="form-label" for="pageRefStringInput">Page Reference Sequence (comma-separated)</label>
+                        <input type="text" id="pageRefStringInput" class="form-input" value="7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2, 1, 2, 0, 1, 7, 0, 1">
+                    </div>
+
+                    <!-- Comparison Stat Cards -->
+                    <div class="comparison-grid" id="pageComparisonGrid">
+                        <div class="comparison-card" id="cardFifo">
+                            <div class="comparison-algo-name">First-In First-Out (FIFO)</div>
+                            <div class="comparison-stat mid" id="statFifoFaults">--</div>
+                            <div class="comparison-label">Page Faults</div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;" id="statFifoRate">Fault Rate: --%</div>
+                        </div>
+                        <div class="comparison-card best" id="cardLru">
+                            <div class="comparison-algo-name">Least Recently Used (LRU)</div>
+                            <div class="comparison-stat good" id="statLruFaults">--</div>
+                            <div class="comparison-label">Page Faults</div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;" id="statLruRate">Fault Rate: --%</div>
+                        </div>
+                        <div class="comparison-card" id="cardClock">
+                            <div class="comparison-algo-name">Clock (Second-Chance)</div>
+                            <div class="comparison-stat good" id="statClockFaults">--</div>
+                            <div class="comparison-label">Page Faults</div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;" id="statClockRate">Fault Rate: --%</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <!-- TAB 5: SYNTHETIC WORKLOAD SUITE                                -->
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <section id="panelWorkloads" class="tab-panel" role="tabpanel">
+                <div class="grid-2" style="margin-bottom: var(--space-lg);">
+                    <!-- CPU Hog Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">🔥</span> CPU Hog Workload</div>
+                            <span class="card-badge" style="background: var(--accent-rose-glow); color: var(--accent-rose);">Stress Test</span>
+                        </div>
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                            Launches a synthetic multi-threaded CPU spinner that consumes 100% of an allocated core. Watch the <strong>Intelligent Policy Engine</strong> automatically detect the abnormal consumption and throttle it or assign it to a Job Object cap!
+                        </p>
+                        <div class="form-row" style="margin-bottom: var(--space-md);">
+                            <div class="form-group">
+                                <label class="form-label" for="cpuHogThreads">Threads</label>
+                                <input type="number" id="cpuHogThreads" class="form-input" value="2" min="1" max="8">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="cpuHogDuration">Duration (sec)</label>
+                                <input type="number" id="cpuHogDuration" class="form-input" value="60" min="10" max="300">
+                            </div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-danger" id="btnLaunchCpuHog">🚀 Launch Unrestricted CPU Hog</button>
+                            <button class="btn btn-primary" id="btnLaunchCpuHogCapped">🛡️ Launch Inside 20% Cap Sandbox</button>
+                        </div>
+                    </div>
+
+                    <!-- Memory Hog Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">🧠</span> Memory Hog Workload</div>
+                            <span class="card-badge" style="background: var(--accent-cyan-glow); color: var(--accent-cyan);">Thrashing Test</span>
+                        </div>
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                            Continuously allocates private heap pages in 10MB increments up to a ceiling. When launched inside an isolated Job Object with a 50MB hard limit, the Windows NT Kernel triggers an out-of-memory exception or terminates the process safely without freezing your system.
+                        </p>
+                        <div class="form-row" style="margin-bottom: var(--space-md);">
+                            <div class="form-group">
+                                <label class="form-label" for="memHogMax">Target Alloc (MB)</label>
+                                <input type="number" id="memHogMax" class="form-input" value="150" min="20" max="1000">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="memHogChunk">Chunk Size (MB)</label>
+                                <input type="number" id="memHogChunk" class="form-input" value="10" min="1" max="50">
+                            </div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" id="btnLaunchMemHog">🚀 Launch Memory Hog</button>
+                            <button class="btn btn-success" id="btnLaunchMemHogCapped">🛡️ Launch Inside 50MB Hard Limit</button>
+                        </div>
+                    </div>
+
+                    <!-- Deadlock Trigger Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">🔒</span> Deadlock Inversion Demo</div>
+                            <span class="card-badge" style="background: var(--accent-amber-glow); color: var(--accent-amber);">Concurrency Test</span>
+                        </div>
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                            Launches synthetic worker threads acquiring two shared mutexes (Lock A and Lock B) in reversed order: Thread 1 acquires (A &rarr; B) while Thread 2 acquires (B &rarr; A). Demonstrates true mutual exclusion circular wait.
+                        </p>
+                        <button class="btn btn-primary" id="btnLaunchDeadlockDemo">
+                            ⚡ Spawn Real Thread Deadlock
+                        </button>
+                    </div>
+
+                    <!-- Sandboxed App Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <div class="card-title"><span class="icon">📦</span> Untrusted Sandboxed Application</div>
+                            <span class="card-badge">Restricted Token</span>
+                        </div>
+                        <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
+                            Simulates an untrusted binary executing with Low Integrity Security Token, active process limits, and strict memory/CPU boundaries. Tests fork-bomb resilience and hard kill-on-close guarantees.
+                        </p>
+                        <button class="btn btn-primary" id="btnLaunchSandboxedApp">
+                            🛡️ Launch in Low-Integrity Sandbox
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Spawned Workloads Monitor Table -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title"><span class="icon">📋</span> Active Spawned Workloads</div>
+                        <button class="btn btn-sm" id="btnRefreshWorkloads">🔄 Refresh</button>
+                    </div>
+                    <div class="data-table-wrapper">
+                        <table class="data-table" id="workloadTable">
+                            <thead>
+                                <tr>
+                                    <th>Workload ID</th>
+                                    <th>Process PID</th>
+                                    <th>Execution Status</th>
+                                    <th>Exit Code</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="workloadTableBody">
+                                <tr>
+                                    <td colspan="5" style="text-align: center; color: var(--text-muted);">
+                                        No synthetic workloads spawned yet. Click any launch button above.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- ── Toast Notification Container ────────────────────────────────────── -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- ── JavaScript Application Modules ──────────────────────────────────── -->
+    <script src="/static/js/telemetry.js"></script>
+    <script src="/static/js/isolation.js"></script>
+    <script src="/static/js/deadlock_graph.js"></script>
+    <script src="/static/js/simulator.js"></script>
+    <script src="/static/js/workloads.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
