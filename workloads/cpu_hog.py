@@ -27,9 +27,19 @@ def cpu_work():
         n += 1
 
 
+import argparse
+
+
 def main():
-    num_threads = int(sys.argv[1]) if len(sys.argv) > 1 else 4
-    duration = int(sys.argv[2]) if len(sys.argv) > 2 else 0  # 0 = infinite
+    parser = argparse.ArgumentParser(description="CPU Hog Workload")
+    parser.add_argument("pos_threads", nargs="?", type=int, default=None)
+    parser.add_argument("pos_duration", nargs="?", type=int, default=None)
+    parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--duration", type=int, default=None)
+    parsed, _ = parser.parse_known_args()
+
+    num_threads = parsed.threads if parsed.threads is not None else (parsed.pos_threads if parsed.pos_threads is not None else 4)
+    duration = parsed.duration if parsed.duration is not None else (parsed.pos_duration if parsed.pos_duration is not None else 0)
 
     print(f"[CPU HOG] PID: {os.getpid()}")
     print(f"[CPU HOG] Threads: {num_threads}")

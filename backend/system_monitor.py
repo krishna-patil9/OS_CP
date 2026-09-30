@@ -142,6 +142,22 @@ class SystemMonitor:
                 "swap_percent": snap.swap_percent,
                 "process_count": snap.process_count,
                 "thread_count": snap.thread_count,
+                "cpu": {
+                    "percent": snap.cpu_percent,
+                    "logical_cores": snap.cpu_count,
+                    "physical_cores": psutil.cpu_count(logical=False) or snap.cpu_count,
+                    "per_core": snap.cpu_per_core,
+                },
+                "memory": {
+                    "percent": snap.memory_percent,
+                    "used_gb": round(snap.memory_used_mb / 1024, 2),
+                    "total_gb": round(snap.memory_total_mb / 1024, 2),
+                    "available_gb": round(snap.memory_available_mb / 1024, 2),
+                },
+                "process_counts": {
+                    "total": snap.process_count,
+                    "threads": snap.thread_count,
+                },
             }
 
     def get_processes(self) -> List[dict]:

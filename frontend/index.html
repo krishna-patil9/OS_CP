@@ -388,8 +388,21 @@
             <!-- TAB 4: OS ALGORITHM SIMULATOR                                  -->
             <!-- ═══════════════════════════════════════════════════════════════ -->
             <section id="panelSimulator" class="tab-panel" role="tabpanel">
+                <!-- Sub-Navigation for Simulator -->
+                <div style="display: flex; gap: var(--space-sm); margin-bottom: var(--space-md); border-bottom: 1px solid var(--border-glass); padding-bottom: var(--space-sm); flex-wrap: wrap;">
+                    <button type="button" class="btn btn-sm btn-primary" id="btnSubTabMlfq" onclick="Simulator.switchSubTab('mlfq')">
+                        ⏱️ MLFQ CPU Scheduler
+                    </button>
+                    <button type="button" class="btn btn-sm" id="btnSubTabPage" onclick="Simulator.switchSubTab('page')">
+                        📑 Virtual Memory Page Replacement
+                    </button>
+                    <button type="button" class="btn btn-sm" id="btnSubTabBoth" onclick="Simulator.switchSubTab('both')">
+                        👁️ View Both
+                    </button>
+                </div>
+
                 <!-- Top Section: MLFQ Scheduler Visualizer -->
-                <div class="card" style="margin-bottom: var(--space-lg);">
+                <div class="card" id="cardMlfq" style="margin-bottom: var(--space-lg);">
                     <div class="card-header">
                         <div class="card-title"><span class="icon">⏱️</span> Multi-Level Feedback Queue (MLFQ) CPU Scheduler</div>
                         <div class="btn-group">
@@ -464,21 +477,27 @@
                 </div>
 
                 <!-- Bottom Section: Virtual Memory Page Replacement Visualizer -->
-                <div class="card">
+                <div class="card" id="cardPageReplacement">
                     <div class="card-header">
                         <div class="card-title"><span class="icon">📑</span> Virtual Memory Page Replacement Algorithm Suite</div>
                         <div class="btn-group">
-                            <button class="btn btn-sm btn-primary" id="btnRunPageSim">Compare FIFO vs LRU vs Clock</button>
+                            <button class="btn btn-sm btn-primary" id="btnRunPageSim">▶️ Compare All Algorithms</button>
                         </div>
                     </div>
                     <p style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
-                        Evaluates page fault rates under identical memory pressure (3 frames) across the standard operating systems reference sequence.
+                        Evaluates page fault rates under configurable memory pressure across any reference sequence. Inspect step-by-step frame allocations and evictions below.
                     </p>
 
-                    <!-- Reference String Display -->
-                    <div class="form-group" style="margin-bottom: var(--space-md);">
-                        <label class="form-label" for="pageRefStringInput">Page Reference Sequence (comma-separated)</label>
-                        <input type="text" id="pageRefStringInput" class="form-input" value="7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2, 1, 2, 0, 1, 7, 0, 1">
+                    <!-- Reference String & Frames Inputs -->
+                    <div class="form-row" style="margin-bottom: var(--space-md);">
+                        <div class="form-group" style="flex: 3;">
+                            <label class="form-label" for="pageRefStringInput">Page Reference Sequence (comma-separated)</label>
+                            <input type="text" id="pageRefStringInput" class="form-input" value="7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2, 1, 2, 0, 1, 7, 0, 1">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label class="form-label" for="pageFramesInput">Physical Frames</label>
+                            <input type="number" id="pageFramesInput" class="form-input" value="3" min="2" max="8">
+                        </div>
                     </div>
 
                     <!-- Comparison Stat Cards -->
@@ -500,6 +519,28 @@
                             <div class="comparison-stat good" id="statClockFaults">--</div>
                             <div class="comparison-label">Page Faults</div>
                             <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;" id="statClockRate">Fault Rate: --%</div>
+                        </div>
+                    </div>
+
+                    <!-- Step-by-Step Frame Matrix Visualizer -->
+                    <div style="margin-top: var(--space-lg);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm); flex-wrap: wrap; gap: var(--space-sm);">
+                            <div class="card-title" style="font-size: 0.85rem; margin-bottom: 0;">
+                                <span class="icon">🎞️</span> Step-by-Step Memory Frame Allocation Matrix
+                            </div>
+                            <div class="btn-group" id="pageAlgoTabs">
+                                <button class="algo-tab-btn active" data-algo="FIFO" id="tabFifo">FIFO Trace</button>
+                                <button class="algo-tab-btn" data-algo="LRU" id="tabLru">LRU Trace</button>
+                                <button class="algo-tab-btn" data-algo="Clock" id="tabClock">Clock Trace</button>
+                            </div>
+                        </div>
+                        <p style="font-size: 0.72rem; color: var(--text-tertiary); margin-bottom: var(--space-xs);">
+                            Columns display the reference sequence step-by-step. Each row shows the page residing in the physical frame slot. Green indicates a cache <strong style="color: var(--accent-emerald);">HIT</strong>, crimson indicates a page <strong style="color: var(--accent-rose);">FAULT</strong>.
+                        </p>
+                        <div id="pageMatrixContainer" class="page-matrix-wrapper">
+                            <div style="color: var(--text-muted); font-size: 0.75rem; padding: var(--space-md); text-align: center;">
+                                Click "Compare All Algorithms" to generate the step-by-step frame matrix.
+                            </div>
                         </div>
                     </div>
                 </div>

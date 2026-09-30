@@ -95,6 +95,7 @@ class MLFQScheduler:
         self.config = config or MLFQConfig()
         self.processes: List[MLFQProcess] = []
         self.events: List[SchedulerEvent] = []
+        self.gantt_slices: List[dict] = []
         self.current_time: int = 0
         self.completed: List[MLFQProcess] = []
 
@@ -105,6 +106,7 @@ class MLFQScheduler:
     def reset(self):
         """Reset simulation state."""
         self.events.clear()
+        self.gantt_slices.clear()
         self.completed.clear()
         self.current_time = 0
         for p in self.processes:
@@ -171,6 +173,24 @@ class MLFQScheduler:
 
             # 4. Execute for 1 time unit
             if running:
+                # Record into gantt timeline
+                if (self.gantt_slices and
+                        self.gantt_slices[-1]["process_id"] == running.id and
+                        self.gantt_slices[-1]["queue"] == running.current_queue and
+                        self.gantt_slices[-1]["end_time"] == self.current_time):
+                    self.gantt_slices[-1]["end_time"] += 1
+                    self.gantt_slices[-1]["duration"] += 1
+                else:
+                    self.gantt_slices.append({
+                        "process_id": running.id,
+                        "proc_id": running.id,
+                        "name": running.name,
+                        "queue": running.current_queue,
+                        "start_time": self.current_time,
+                        "end_time": self.current_time + 1,
+                        "duration": 1,
+                    })
+
                 running.remaining_burst -= 1
                 quantum_used += 1
 
@@ -279,7 +299,7 @@ class MLFQScheduler:
         ))
 
     def _build_results(self) -> dict:
-        """Build final simulation results."""
+        """Build final simulation results with backward-compatible aliases."""
         events_data = []
         for e in self.events:
             events_data.append({
@@ -301,6 +321,7 @@ class MLFQScheduler:
                 "completion_time": p.completion_time,
                 "turnaround_time": p.turnaround_time,
                 "wait_time": p.wait_time,
+                "waiting_time": p.wait_time,
                 "response_time": p.response_time,
                 "final_queue": p.current_queue,
             })
@@ -314,22 +335,28 @@ class MLFQScheduler:
             avg_wait = sum(p.wait_time for p in self.processes) / n
             avg_resp = sum(p.response_time for p in self.processes if p.response_time >= 0) / max(1, n)
 
+        summary_data = {
+            "total_time": self.current_time,
+            "avg_turnaround_time": round(avg_tat, 2),
+            "avg_wait_time": round(avg_wait, 2),
+            "avg_waiting_time": round(avg_wait, 2),
+            "avg_response_time": round(avg_resp, 2),
+            "completed_processes": len(self.completed),
+            "total_processes": len(self.processes),
+        }
+
         return {
             "events": events_data,
+            "processes": process_stats,
             "process_stats": process_stats,
+            "gantt_chart": self.gantt_slices,
             "config": {
                 "num_queues": self.config.num_queues,
                 "time_quanta": self.config.time_quanta,
                 "boost_interval": self.config.boost_interval,
             },
-            "summary": {
-                "total_time": self.current_time,
-                "avg_turnaround_time": round(avg_tat, 2),
-                "avg_wait_time": round(avg_wait, 2),
-                "avg_response_time": round(avg_resp, 2),
-                "completed_processes": len(self.completed),
-                "total_processes": len(self.processes),
-            },
+            "summary": summary_data,
+            "metrics": summary_data,
         }
 
     @staticmethod
@@ -523,9 +550,16 @@ class PageReplacementSimulator:
         lru = self.simulate_lru(reference_string, num_frames)
         clock = self.simulate_clock(reference_string, num_frames)
 
+        best = min(
+            ["FIFO", "LRU", "Clock"],
+            key=lambda a: {"FIFO": fifo, "LRU": lru, "Clock": clock}[a]["summary"]["page_faults"],
+        )
+
         return {
             "reference_string": reference_string,
             "num_frames": num_frames,
+            "total_references": len(reference_string),
+            "best_algorithm": best,
             "algorithms": {
                 "FIFO": fifo,
                 "LRU": lru,
@@ -538,10 +572,7 @@ class PageReplacementSimulator:
                 "FIFO_hit_rate": fifo["summary"]["hit_rate"],
                 "LRU_hit_rate": lru["summary"]["hit_rate"],
                 "Clock_hit_rate": clock["summary"]["hit_rate"],
-                "best_algorithm": min(
-                    ["FIFO", "LRU", "Clock"],
-                    key=lambda a: {"FIFO": fifo, "LRU": lru, "Clock": clock}[a]["summary"]["page_faults"],
-                ),
+                "best_algorithm": best,
             },
         }
 
@@ -550,10 +581,24 @@ class PageReplacementSimulator:
                            hits: int, faults: int) -> dict:
         """Build result dict for a page replacement simulation."""
         total = len(ref_string)
+        summary = {
+            "total_references": total,
+            "page_hits": hits,
+            "page_faults": faults,
+            "hit_rate": round(hits / total * 100, 1) if total > 0 else 0,
+            "fault_rate": round(faults / total * 100, 1) if total > 0 else 0,
+        }
         return {
             "algorithm": algorithm,
             "reference_string": ref_string,
             "num_frames": num_frames,
+            # Direct root access for frontend compatibility
+            "total_references": total,
+            "page_hits": hits,
+            "page_faults": faults,
+            "fault_count": faults,
+            "hit_rate": summary["hit_rate"],
+            "fault_rate": summary["fault_rate"],
             "events": [
                 {
                     "step": e.step,
@@ -565,13 +610,7 @@ class PageReplacementSimulator:
                 }
                 for e in events
             ],
-            "summary": {
-                "total_references": total,
-                "page_hits": hits,
-                "page_faults": faults,
-                "hit_rate": round(hits / total * 100, 1) if total > 0 else 0,
-                "fault_rate": round(faults / total * 100, 1) if total > 0 else 0,
-            },
+            "summary": summary,
         }
 
     @staticmethod

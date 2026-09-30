@@ -45,9 +45,20 @@ def memory_work(target_mb, chunk_mb=5, interval=1.0):
         time.sleep(1)
 
 
+import argparse
+
+
 def main():
-    cpu_threads = int(sys.argv[1]) if len(sys.argv) > 1 else 2
-    target_mem_mb = int(sys.argv[2]) if len(sys.argv) > 2 else 200
+    parser = argparse.ArgumentParser(description="Sandboxed App Workload")
+    parser.add_argument("pos_threads", nargs="?", type=int, default=None)
+    parser.add_argument("pos_mem", nargs="?", type=int, default=None)
+    parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--memory-mb", "--memory", type=int, default=None)
+    parsed, _ = parser.parse_known_args()
+
+    cpu_threads = parsed.threads if parsed.threads is not None else (parsed.pos_threads if parsed.pos_threads is not None else 2)
+    target_mem_mb = parsed.memory_mb if parsed.memory_mb is not None else (parsed.pos_mem if parsed.pos_mem is not None else 200)
+
 
     print(f"[SANDBOXED APP] PID: {os.getpid()}")
     print(f"[SANDBOXED APP] CPU threads: {cpu_threads}")

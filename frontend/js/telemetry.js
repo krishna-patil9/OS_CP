@@ -79,9 +79,14 @@ const Telemetry = (() => {
     }
 
     function resizeCanvas(canvas) {
+        if (!canvas || !canvas.parentElement) return;
         const rect = canvas.parentElement.getBoundingClientRect();
-        canvas.width = rect.width;
-        canvas.height = rect.height || 200;
+        const w = Math.floor(rect.width) || 300;
+        const h = Math.floor(rect.height) || 180;
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
     }
 
     function update(telemetryData) {
@@ -89,47 +94,73 @@ const Telemetry = (() => {
 
         const { system, processes, history, decisions, process_categories, policy_stats } = telemetryData;
 
+        // Seed rolling history immediately from backend if available
+        if (history) {
+            if (cpuHistory.length === 0 && Array.isArray(history.cpu) && history.cpu.length > 0) {
+                cpuHistory = [...history.cpu];
+            }
+            if (memHistory.length === 0 && Array.isArray(history.memory) && history.memory.length > 0) {
+                memHistory = [...history.memory];
+            }
+        }
+
         // 1. Update Stat Cards
-        if (system && system.cpu) {
-            const cpuPercent = system.cpu.percent || 0;
+        if (system) {
+            const cpuPercent = (system.cpu && system.cpu.percent !== undefined)
+                ? system.cpu.percent
+                : (system.cpu_percent !== undefined ? system.cpu_percent : 0);
+            const physicalCores = (system.cpu && system.cpu.physical_cores) || (system.cpu_count ? Math.max(1, Math.floor(system.cpu_count / 2)) : '-');
+            const logicalCores = (system.cpu && system.cpu.logical_cores) || system.cpu_count || '-';
+
             const elCpu = document.getElementById('statCpuPercent');
             const barCpu = document.getElementById('barCpuPercent');
             const elCores = document.getElementById('statCpuCores');
 
             if (elCpu) elCpu.textContent = cpuPercent.toFixed(1) + '%';
             if (barCpu) barCpu.style.width = Math.min(100, Math.max(0, cpuPercent)) + '%';
-            if (elCores) elCores.textContent = `${system.cpu.physical_cores || '-'} Physical | ${system.cpu.logical_cores || '-'} Logical Cores`;
+            if (elCores) elCores.textContent = `${physicalCores} Physical | ${logicalCores} Logical Cores`;
 
             // Append to CPU chart history
             cpuHistory.push(cpuPercent);
             if (cpuHistory.length > MAX_POINTS) cpuHistory.shift();
             drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
-        }
 
-        if (system && system.memory) {
-            const mem = system.memory;
-            const memPercent = mem.percent || 0;
+            const mem = system.memory || {};
+            const memPercent = (mem.percent !== undefined)
+                ? mem.percent
+                : (system.memory_percent !== undefined ? system.memory_percent : 0);
+            const memUsedGb = (mem.used_gb !== undefined)
+                ? mem.used_gb
+                : (system.memory_used_mb ? (system.memory_used_mb / 1024) : 0);
+            const memTotalGb = (mem.total_gb !== undefined)
+                ? mem.total_gb
+                : (system.memory_total_mb ? (system.memory_total_mb / 1024) : 0);
+
             const elMem = document.getElementById('statMemPercent');
             const barMem = document.getElementById('barMemPercent');
             const elDetail = document.getElementById('statMemDetail');
 
             if (elMem) elMem.textContent = memPercent.toFixed(1) + '%';
             if (barMem) barMem.style.width = Math.min(100, Math.max(0, memPercent)) + '%';
-            if (elDetail) elDetail.textContent = `${(mem.used_gb || 0).toFixed(1)} GB / ${(mem.total_gb || 0).toFixed(1)} GB`;
+            if (elDetail) elDetail.textContent = `${memUsedGb.toFixed(1)} GB / ${memTotalGb.toFixed(1)} GB`;
 
             // Append to Memory chart history
             memHistory.push(memPercent);
             if (memHistory.length > MAX_POINTS) memHistory.shift();
             drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
-        }
 
-        if (system && system.process_counts) {
-            const pc = system.process_counts;
+            const totalProcs = (system.process_counts && system.process_counts.total)
+                || system.process_count
+                || (processes ? processes.length : 0);
+            const totalThreads = (system.process_counts && system.process_counts.threads)
+                || system.thread_count
+                || 0;
+
             const elProc = document.getElementById('statProcCount');
             const elThreads = document.getElementById('statThreadCount');
 
-            if (elProc) elProc.textContent = pc.total || processes?.length || 0;
-            if (elThreads) elThreads.textContent = `${pc.threads || 0} Active Threads`;
+            if (elProc) elProc.textContent = totalProcs;
+            if (elThreads) elThreads.textContent = `${totalThreads} Active Threads`;
         }
 
         if (policy_stats) {
@@ -280,13 +311,15 @@ const Telemetry = (() => {
     function drawChart(canvas, ctx, data, color, label) {
         if (!canvas || !ctx) return;
 
+        resizeCanvas(canvas);
+
         const w = canvas.width;
         const h = canvas.height;
 
         ctx.clearRect(0, 0, w, h);
 
         // Background subtle grid lines
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         for (let y = 0; y <= h; y += h / 4) {
@@ -295,10 +328,19 @@ const Telemetry = (() => {
         }
         ctx.stroke();
 
-        if (data.length < 2) return;
+        if (!data || data.length === 0) {
+            ctx.fillStyle = '#64748b';
+            ctx.font = '12px "Inter", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Awaiting telemetry stream...', w / 2, h / 2);
+            return;
+        }
+
+        // If only 1 point, duplicate it so we have a valid line segment
+        const points = data.length === 1 ? [data[0], data[0]] : data;
 
         const step = w / (MAX_POINTS - 1);
-        const startX = w - (data.length - 1) * step;
+        const startX = w - (points.length - 1) * step;
 
         // Create gradient fill
         const grad = ctx.createLinearGradient(0, 0, 0, h);
@@ -307,17 +349,18 @@ const Telemetry = (() => {
 
         // Path
         ctx.beginPath();
-        ctx.moveTo(startX, h - (data[0] / 100) * h);
+        ctx.moveTo(startX, h - (points[0] / 100) * h);
 
-        for (let i = 1; i < data.length; i++) {
+        for (let i = 1; i < points.length; i++) {
             const x = startX + i * step;
-            const y = h - (data[i] / 100) * h;
+            const y = h - (points[i] / 100) * h;
             ctx.lineTo(x, y);
         }
 
         // Stroke line
         ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.5;
+        ctx.lineJoin = 'round';
         ctx.stroke();
 
         // Fill area under curve
@@ -328,11 +371,11 @@ const Telemetry = (() => {
         ctx.fill();
 
         // Current value readout badge
-        const lastVal = data[data.length - 1];
+        const lastVal = points[points.length - 1];
         ctx.fillStyle = '#f1f5f9';
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = 'bold 11px "JetBrains Mono", monospace';
         ctx.textAlign = 'right';
-        ctx.fillText(`${label}: ${lastVal.toFixed(1)}%`, w - 8, 14);
+        ctx.fillText(`${label}: ${lastVal.toFixed(1)}%`, w - 10, 18);
     }
 
     // Process Control Actions

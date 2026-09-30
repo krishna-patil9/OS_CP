@@ -68,14 +68,27 @@ REALTIME_PRIORITY_CLASS                  = 0x00000100
 
 PRIORITY_CLASS_MAP = {
     "idle": IDLE_PRIORITY_CLASS,
+    "idle_priority_class": IDLE_PRIORITY_CLASS,
     "below_normal": BELOW_NORMAL_PRIORITY_CLASS,
+    "below_normal_priority_class": BELOW_NORMAL_PRIORITY_CLASS,
     "normal": NORMAL_PRIORITY_CLASS,
+    "normal_priority_class": NORMAL_PRIORITY_CLASS,
     "above_normal": ABOVE_NORMAL_PRIORITY_CLASS,
+    "above_normal_priority_class": ABOVE_NORMAL_PRIORITY_CLASS,
     "high": HIGH_PRIORITY_CLASS,
+    "high_priority_class": HIGH_PRIORITY_CLASS,
     "realtime": REALTIME_PRIORITY_CLASS,
+    "realtime_priority_class": REALTIME_PRIORITY_CLASS,
 }
 
-PRIORITY_CLASS_NAMES = {v: k for k, v in PRIORITY_CLASS_MAP.items()}
+PRIORITY_CLASS_NAMES = {
+    IDLE_PRIORITY_CLASS: "idle",
+    BELOW_NORMAL_PRIORITY_CLASS: "below_normal",
+    NORMAL_PRIORITY_CLASS: "normal",
+    ABOVE_NORMAL_PRIORITY_CLASS: "above_normal",
+    HIGH_PRIORITY_CLASS: "high",
+    REALTIME_PRIORITY_CLASS: "realtime",
+}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Win32 Structures
@@ -222,7 +235,7 @@ class IsolationEngine:
 
     def __init__(self):
         self._sandboxes: Dict[str, SandboxContainer] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._decision_log: List[dict] = []
 
     # ── Job Object Lifecycle ──────────────────────────────────────────────
@@ -549,6 +562,12 @@ class IsolationEngine:
                     "name": name,
                     "is_active": container.is_active,
                     "created_at": container.created_at,
+                    "cpu_rate_percent": container.config.cpu_rate_percent,
+                    "memory_limit_mb": container.config.memory_limit_mb,
+                    "max_active_processes": container.config.max_active_processes,
+                    "priority_class": container.config.priority_class,
+                    "kill_on_close": container.config.kill_on_close,
+                    "max_working_set_mb": container.config.max_working_set_mb,
                     "config": {
                         "cpu_rate_percent": container.config.cpu_rate_percent,
                         "memory_limit_mb": container.config.memory_limit_mb,

@@ -14,8 +14,17 @@ import threading
 import os
 
 
+import argparse
+
+
 def main():
-    num_locks = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+    parser = argparse.ArgumentParser(description="Deadlock Demo Workload")
+    parser.add_argument("pos_locks", nargs="?", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--delay", type=float, default=1.0)
+    parsed, _ = parser.parse_known_args()
+
+    num_locks = parsed.workers if parsed.workers is not None else (parsed.pos_locks if parsed.pos_locks is not None else 3)
 
     print(f"[DEADLOCK DEMO] PID: {os.getpid()}")
     print(f"[DEADLOCK DEMO] Creating {num_locks} locks for circular wait...")

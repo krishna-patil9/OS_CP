@@ -32,10 +32,10 @@ class Resource:
     id: str
     name: str
     total_instances: int
-    available_instances: int = 0
+    available_instances: Optional[int] = None
 
     def __post_init__(self):
-        if self.available_instances == 0:
+        if self.available_instances is None:
             self.available_instances = self.total_instances
 
 
@@ -273,6 +273,7 @@ class WaitForGraph:
             nodes.append({
                 "id": pid,
                 "name": proc.name,
+                "label": proc.name,
                 "type": "process",
                 "priority": proc.priority,
                 "allocated": proc.allocated,
@@ -283,8 +284,10 @@ class WaitForGraph:
             nodes.append({
                 "id": rid,
                 "name": res.name,
+                "label": res.name,
                 "type": "resource",
                 "total": res.total_instances,
+                "instances": res.total_instances,
                 "available": res.available_instances,
             })
 

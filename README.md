@@ -142,12 +142,7 @@ http://127.0.0.1:8000
 - **Kernel Accounting**: Inspect total kernel time, user time, peak memory, and page fault counters for any sandbox.
 
 ### 3. Deadlock & Concurrency Engine (Tab 3)
-- **Interactive Wait-For Graph (WFG)**:
-  - Directed bipartite graph with Process circles and Resource squares.
-  - Detects deadlocks in $O(V + E)$ using **Tarjan's Strongly Connected Components / DFS cycle detection**.
-  - Animated pulsing crimson highlights indicate active circular wait cycles.
-  - Evaluates an OS cost function to identify the **Optimal Victim Process** for preemption based on Priority, Runtime, and Memory consumption.
-- **Dijkstra's Banker's Algorithm**:
+- **Interactive Wait-For Graph (WFG)**:**:
   - Live Allocation, Max Claim, Need, and Available matrices.
   - Executes safety algorithm to find safe sequences (e.g. $P_1 \to P_3 \to P_4 \to P_0 \to P_2$) or alert on unsafe states.
 
@@ -156,6 +151,11 @@ http://127.0.0.1:8000
   - 3-queue feedback scheduler: Q0 (Quantum = 4ms), Q1 (Quantum = 8ms), Q2 (Quantum = 16ms).
   - Visual process chips transition through queues as time quanta expire.
   - Execution Gantt chart visualizes time slice allocations and global boost events.
+  - Directed bipartite graph with Process circles and Resource squares.
+  - Detects deadlocks in $O(V + E)$ using **Tarjan's Strongly Connected Components / DFS cycle detection**.
+  - Animated pulsing crimson highlights indicate active circular wait cycles.
+  - Evaluates an OS cost function to identify the **Optimal Victim Process** for preemption based on Priority, Runtime, and Memory consumption.
+- **Dijkstra's Banker's Algorithm
   - Detailed metrics table: Turnaround Time, Waiting Time, and CPU utilization.
 - **Virtual Memory Page Replacement**:
   - Benchmarks **FIFO**, **LRU**, and **Clock (Second-Chance)** side-by-side on any reference string.

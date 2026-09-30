@@ -194,6 +194,7 @@ const Isolation = (() => {
 
         let html = '';
         for (const sb of cachedSandboxes) {
+            const cfg = sb.config || sb;
             const pids = sb.assigned_pids || [];
             const pidTags = pids.length > 0
                 ? pids.map(p => `<span class="sandbox-pid-tag">PID ${p}</span>`).join(' ')
@@ -212,19 +213,19 @@ const Isolation = (() => {
                     <div class="sandbox-limits">
                         <div class="sandbox-limit">
                             <span class="sandbox-limit-label">CPU Rate Hard Cap</span>
-                            <span class="sandbox-limit-value">${sb.cpu_rate_percent ? sb.cpu_rate_percent + '%' : 'Unlimited'}</span>
+                            <span class="sandbox-limit-value">${cfg.cpu_rate_percent ? cfg.cpu_rate_percent + '%' : 'Unlimited'}</span>
                         </div>
                         <div class="sandbox-limit">
                             <span class="sandbox-limit-label">Hard RAM Limit</span>
-                            <span class="sandbox-limit-value">${sb.memory_limit_mb ? sb.memory_limit_mb + ' MB' : 'Unlimited'}</span>
+                            <span class="sandbox-limit-value">${cfg.memory_limit_mb ? cfg.memory_limit_mb + ' MB' : 'Unlimited'}</span>
                         </div>
                         <div class="sandbox-limit">
                             <span class="sandbox-limit-label">Max Procs (Fork Cap)</span>
-                            <span class="sandbox-limit-value">${sb.max_active_processes || 'Unlimited'}</span>
+                            <span class="sandbox-limit-value">${cfg.max_active_processes || 'Unlimited'}</span>
                         </div>
                         <div class="sandbox-limit">
                             <span class="sandbox-limit-label">Priority Class</span>
-                            <span class="sandbox-limit-value" style="font-size: 0.75rem;">${escapeHtml(sb.priority_class || 'DEFAULT')}</span>
+                            <span class="sandbox-limit-value" style="font-size: 0.75rem;">${escapeHtml(cfg.priority_class || 'DEFAULT')}</span>
                         </div>
                     </div>
 

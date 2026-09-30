@@ -13,10 +13,22 @@ import time
 import os
 
 
+import argparse
+
+
 def main():
-    chunk_size_mb = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    max_mb = int(sys.argv[2]) if len(sys.argv) > 2 else 500
-    interval = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
+    parser = argparse.ArgumentParser(description="Memory Hog Workload")
+    parser.add_argument("pos_chunk", nargs="?", type=int, default=None)
+    parser.add_argument("pos_max", nargs="?", type=int, default=None)
+    parser.add_argument("pos_interval", nargs="?", type=float, default=None)
+    parser.add_argument("--chunk-mb", type=int, default=None)
+    parser.add_argument("--max-mb", type=int, default=None)
+    parser.add_argument("--interval", type=float, default=None)
+    parsed, _ = parser.parse_known_args()
+
+    chunk_size_mb = parsed.chunk_mb if parsed.chunk_mb is not None else (parsed.pos_chunk if parsed.pos_chunk is not None else 10)
+    max_mb = parsed.max_mb if parsed.max_mb is not None else (parsed.pos_max if parsed.pos_max is not None else 500)
+    interval = parsed.interval if parsed.interval is not None else (parsed.pos_interval if parsed.pos_interval is not None else 0.5)
 
     print(f"[MEMORY HOG] PID: {os.getpid()}")
     print(f"[MEMORY HOG] Chunk size: {chunk_size_mb} MB")

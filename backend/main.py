@@ -649,31 +649,64 @@ async def launch_workload(req: WorkloadRequest):
         raise HTTPException(404, f"Workload script not found: {script}")
 
     cmd = [sys.executable, str(script_path)] + req.args
+    proc = None
+    launch_note = ""
+
+    # Try launching with escalating fallbacks to handle WinError 5 (Access Denied)
+    # when the server itself is inside a Job Object that blocks child breakaway.
     try:
+        # Attempt 1: Breakaway from parent Job Object + new console
         proc = subprocess.Popen(
             cmd,
             creationflags=subprocess.CREATE_NEW_CONSOLE | 0x01000000,  # CREATE_BREAKAWAY_FROM_JOB
         )
-        pid = proc.pid
-        workload_id = f"{req.workload_type}_{pid}"
-        spawned_workloads[workload_id] = proc
+        launch_note = "breakaway+console"
+    except OSError:
+        pass
 
-        # If sandbox specified, assign to it
-        if req.sandbox_name:
-            try:
-                isolation.assign_process(req.sandbox_name, pid)
-            except Exception as e:
-                logger.warning(f"Failed to assign PID {pid} to sandbox: {e}")
+    if proc is None:
+        try:
+            # Attempt 2: New console only (no breakaway — process inherits parent Job Object)
+            proc = subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            launch_note = "console-only (inherited job)"
+        except OSError:
+            pass
 
-        return {
-            "status": "launched",
-            "workload_id": workload_id,
-            "pid": pid,
-            "workload_type": req.workload_type,
-            "sandbox": req.sandbox_name,
-        }
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    if proc is None:
+        try:
+            # Attempt 3: Silent background process (no console window)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            launch_note = "background (no console)"
+        except Exception as e:
+            raise HTTPException(500, f"All launch strategies failed: {e}")
+
+    pid = proc.pid
+    workload_id = f"{req.workload_type}_{pid}"
+    spawned_workloads[workload_id] = proc
+    logger.info(f"Launched workload '{req.workload_type}' PID={pid} [{launch_note}]")
+
+    # If sandbox specified, assign to it
+    if req.sandbox_name:
+        try:
+            isolation.assign_process(req.sandbox_name, pid)
+        except Exception as e:
+            logger.warning(f"Failed to assign PID {pid} to sandbox '{req.sandbox_name}': {e}")
+
+    return {
+        "status": "launched",
+        "workload_id": workload_id,
+        "pid": pid,
+        "workload_type": req.workload_type,
+        "sandbox": req.sandbox_name,
+        "launch_mode": launch_note,
+    }
 
 @app.get("/api/workloads")
 async def list_workloads():

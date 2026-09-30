@@ -254,7 +254,8 @@ const DeadlockGraph = (() => {
             // Instances count
             ctx.fillStyle = '#94a3b8';
             ctx.font = '9px "JetBrains Mono", monospace';
-            const inst = node.available !== undefined ? `${node.available}/${node.instances}` : `${node.instances || 1} inst`;
+            const total = node.total !== undefined ? node.total : (node.instances || 1);
+            const inst = node.available !== undefined ? `${node.available}/${total}` : `${total} inst`;
             ctx.fillText(inst, x, y + 9);
         }
 
