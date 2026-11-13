@@ -1,11 +1,12 @@
 /**
- * app.js — Main Application Controller & Router
+ * app.js — Main Application Controller & Router (Optimized)
  * 
  * Coordinates:
- *   - Navigation tab routing & active panel transitions
+ *   - Navigation tab routing & active panel transitions with visibility hooks
+ *   - Two Execution Modes: Normal Mode (Default/Safe) and Testing Mode (OS Labs)
  *   - Global toast notification alert system
- *   - WebSocket connection lifecycle to /ws/telemetry with auto-reconnect
- *   - Dispatching live telemetry packets to sub-controllers
+ *   - WebSocket connection lifecycle with paced 2.0s telemetry & single connection guard
+ *   - Dispatching live telemetry packets to sub-controllers only when needed
  */
 
 const App = (() => {
@@ -13,10 +14,13 @@ const App = (() => {
     let wsReconnectAttempts = 0;
     let wsReconnectTimer = null;
     let startTime = Date.now();
+    let executionMode = 'normal';
+    let currentTab = 'telemetry';
 
     function init() {
         initTabs();
         initUptimeTimer();
+        initModeControls();
 
         // Initialize sub-controllers
         if (typeof Telemetry !== 'undefined') Telemetry.init();
@@ -25,8 +29,99 @@ const App = (() => {
         if (typeof Simulator !== 'undefined') Simulator.init();
         if (typeof Workloads !== 'undefined') Workloads.init();
 
-        // Connect WebSocket
+        // Query initial mode from backend
+        fetchExecutionMode();
+
+        // Connect WebSocket (single connection)
         connectWebSocket();
+
+        // Clean WebSocket close on page exit
+        window.addEventListener('beforeunload', () => {
+            if (ws) {
+                try {
+                    ws.close();
+                } catch (e) {}
+            }
+        });
+    }
+
+    // ── Execution Modes (Normal vs Testing) ──────────────────────────────────
+
+    async function fetchExecutionMode() {
+        try {
+            const res = await fetch('/api/system/mode');
+            if (res.ok) {
+                const data = await res.json();
+                setExecutionMode(data.mode);
+            }
+        } catch (e) {
+            console.debug('Failed to fetch initial mode:', e);
+        }
+    }
+
+    function initModeControls() {
+        const btnToggle = document.getElementById('btnToggleMode');
+        if (btnToggle) {
+            btnToggle.addEventListener('click', toggleExecutionMode);
+        }
+    }
+
+    async function toggleExecutionMode() {
+        const newMode = executionMode === 'normal' ? 'testing' : 'normal';
+        if (newMode === 'testing') {
+            const confirmed = confirm(
+                "Activate Testing Mode?\n\n" +
+                "Testing Mode allows manual launching of synthetic OS workloads (CPU Hog, Memory Hog, Mutex Deadlock, Sandboxed App).\n" +
+                "Workloads are strictly bound to safe laptop limits."
+            );
+            if (!confirmed) return;
+        }
+
+        try {
+            const res = await fetch('/api/system/mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: newMode })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                setExecutionMode(data.mode);
+                showToast(
+                    data.mode === 'normal'
+                        ? '🛡️ Returned to Normal Mode (Lightweight & Safe)'
+                        : '🧪 Testing Mode Active (OS Workloads Unlocked)',
+                    data.mode === 'normal' ? 'info' : 'warning'
+                );
+            }
+        } catch (e) {
+            showToast('Failed to switch mode: ' + e.message, 'error');
+        }
+    }
+
+    function setExecutionMode(mode) {
+        executionMode = mode;
+        const badge = document.getElementById('modeBadge');
+        const btnToggle = document.getElementById('btnToggleMode');
+        const lockBanner = document.getElementById('workloadLockBanner');
+
+        if (badge) {
+            badge.className = `mode-badge ${mode}`;
+            badge.textContent = mode === 'normal' ? '🛡️ Normal Mode' : '🧪 Testing Mode';
+        }
+
+        if (btnToggle) {
+            btnToggle.textContent = mode === 'normal' ? '⚡ Activate Testing Mode' : '🛡️ Return to Normal Mode';
+            btnToggle.className = mode === 'normal' ? 'btn btn-sm btn-outline' : 'btn btn-sm btn-primary';
+        }
+
+        if (lockBanner) {
+            lockBanner.style.display = mode === 'normal' ? 'block' : 'none';
+        }
+    }
+
+    function getExecutionMode() {
+        return executionMode;
     }
 
     // ── Tab Routing ─────────────────────────────────────────────────────────
@@ -42,6 +137,9 @@ const App = (() => {
     }
 
     function switchTab(tabName) {
+        const oldTab = currentTab;
+        currentTab = tabName;
+
         const tabs = document.querySelectorAll('.nav-tab');
         const panels = document.querySelectorAll('.tab-panel');
 
@@ -56,18 +154,35 @@ const App = (() => {
             p.classList.toggle('active', isTarget);
         });
 
-        // If switching to Deadlock tab, trigger canvas redraw after panel becomes visible
-        if (tabName === 'deadlock' && typeof DeadlockGraph !== 'undefined') {
-            setTimeout(() => {
-                DeadlockGraph.loadWfgScenario(document.getElementById('wfgScenarioSelect')?.value || 'circular_wait');
-            }, 50);
+        // Tab lifecycle callbacks to suspend/resume background tasks
+        if (oldTab === 'deadlock' && typeof DeadlockGraph !== 'undefined' && DeadlockGraph.onTabDeactivated) {
+            DeadlockGraph.onTabDeactivated();
+        }
+        if (oldTab === 'workloads' && typeof Workloads !== 'undefined' && Workloads.onTabDeactivated) {
+            Workloads.onTabDeactivated();
+        }
+
+        if (tabName === 'telemetry' && typeof Telemetry !== 'undefined' && Telemetry.onTabActivated) {
+            Telemetry.onTabActivated();
+        } else if (tabName === 'deadlock' && typeof DeadlockGraph !== 'undefined' && DeadlockGraph.onTabActivated) {
+            DeadlockGraph.onTabActivated();
+        } else if (tabName === 'workloads' && typeof Workloads !== 'undefined' && Workloads.onTabActivated) {
+            Workloads.onTabActivated();
         }
     }
 
-    // ── WebSocket Telemetry Stream ──────────────────────────────────────────
+    // ── WebSocket Telemetry Stream (Paced & Protected) ───────────────────────
 
     function connectWebSocket() {
-        if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+        // Prevent duplicate concurrent WebSocket attempts
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+
+        if (wsReconnectTimer) {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+        }
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
@@ -84,14 +199,19 @@ const App = (() => {
             ws.onopen = () => {
                 wsReconnectAttempts = 0;
                 if (dot) dot.className = 'status-dot';
-                if (text) text.textContent = 'Live Kernel Feed';
-                console.log('[WebSocket] Connected to host telemetry stream');
+                if (text) text.textContent = 'Live Feed (~2s)';
+                console.log('[WebSocket] Connected to host telemetry stream (2.0s paced)');
             };
 
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
                     if (data.type === 'telemetry') {
+                        // Sync mode if provided
+                        if (data.mode && data.mode !== executionMode) {
+                            setExecutionMode(data.mode);
+                        }
+
                         // Dispatch to telemetry sub-controller
                         if (typeof Telemetry !== 'undefined') {
                             Telemetry.update(data);
@@ -107,6 +227,7 @@ const App = (() => {
             };
 
             ws.onclose = () => {
+                ws = null;
                 if (dot) dot.className = 'status-dot offline';
                 if (text) text.textContent = 'Disconnected';
                 scheduleReconnect();
@@ -114,7 +235,10 @@ const App = (() => {
 
             ws.onerror = (err) => {
                 console.warn('[WebSocket] Connection error:', err);
-                if (ws) ws.close();
+                if (ws) {
+                    try { ws.close(); } catch (e) {}
+                    ws = null;
+                }
             };
 
         } catch (e) {
@@ -124,12 +248,16 @@ const App = (() => {
     }
 
     function scheduleReconnect() {
+        if (wsReconnectTimer) return;
         wsReconnectAttempts++;
-        const delay = Math.min(5000, 1000 * Math.pow(1.5, wsReconnectAttempts));
+        const delay = Math.min(6000, 1500 * Math.pow(1.3, wsReconnectAttempts));
         const text = document.getElementById('wsStatusText');
         if (text) text.textContent = `Reconnecting in ${(delay / 1000).toFixed(0)}s...`;
 
-        wsReconnectTimer = setTimeout(connectWebSocket, delay);
+        wsReconnectTimer = setTimeout(() => {
+            wsReconnectTimer = null;
+            connectWebSocket();
+        }, delay);
     }
 
     // ── Global Toast Notifications ──────────────────────────────────────────
@@ -151,7 +279,6 @@ const App = (() => {
         toast.innerHTML = `<span style="margin-right: 6px;">${icons[type] || 'ℹ️'}</span>${escapeHtml(message)}`;
         container.appendChild(toast);
 
-        // Auto remove after animation completes (3s)
         setTimeout(() => {
             if (toast.parentElement) {
                 toast.parentElement.removeChild(toast);
@@ -189,7 +316,10 @@ const App = (() => {
     return {
         init,
         switchTab,
-        showToast
+        showToast,
+        getExecutionMode,
+        setExecutionMode,
+        toggleExecutionMode
     };
 })();
 

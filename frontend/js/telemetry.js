@@ -89,6 +89,20 @@ const Telemetry = (() => {
         }
     }
 
+    function isTabVisible() {
+        const panel = document.getElementById('panelTelemetry');
+        return panel && panel.classList.contains('active');
+    }
+
+    function onTabActivated() {
+        if (cpuCanvas) resizeCanvas(cpuCanvas);
+        if (memCanvas) resizeCanvas(memCanvas);
+        drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
+        drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
+        renderProcessTable();
+        renderDecisionFeed();
+    }
+
     function update(telemetryData) {
         if (isPaused) return;
 
@@ -103,6 +117,12 @@ const Telemetry = (() => {
                 memHistory = [...history.memory];
             }
         }
+
+        // Cache latest data
+        if (processes) cachedProcesses = processes;
+        if (decisions) cachedDecisions = decisions;
+
+        const visible = isTabVisible();
 
         // 1. Update Stat Cards
         if (system) {
@@ -123,7 +143,9 @@ const Telemetry = (() => {
             // Append to CPU chart history
             cpuHistory.push(cpuPercent);
             if (cpuHistory.length > MAX_POINTS) cpuHistory.shift();
-            drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
+            if (visible) {
+                drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
+            }
 
             const mem = system.memory || {};
             const memPercent = (mem.percent !== undefined)
@@ -147,7 +169,9 @@ const Telemetry = (() => {
             // Append to Memory chart history
             memHistory.push(memPercent);
             if (memHistory.length > MAX_POINTS) memHistory.shift();
-            drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
+            if (visible) {
+                drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
+            }
 
             const totalProcs = (system.process_counts && system.process_counts.total)
                 || system.process_count
@@ -172,16 +196,10 @@ const Telemetry = (() => {
             }
         }
 
-        // 2. Cache & Render Process Table
-        if (processes) {
-            cachedProcesses = processes;
-            renderProcessTable(process_categories);
-        }
-
-        // 3. Cache & Render Decision Feed
-        if (decisions) {
-            cachedDecisions = decisions;
-            renderDecisionFeed();
+        // 2. Only render table & feed if tab is currently visible
+        if (visible) {
+            if (processes) renderProcessTable(process_categories);
+            if (decisions) renderDecisionFeed();
         }
     }
 
@@ -439,6 +457,7 @@ const Telemetry = (() => {
     return {
         init,
         update,
+        onTabActivated,
         trimProcess,
         setPriority,
         terminateProcess

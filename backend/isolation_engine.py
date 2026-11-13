@@ -90,6 +90,26 @@ PRIORITY_CLASS_NAMES = {
     REALTIME_PRIORITY_CLASS: "realtime",
 }
 
+CRITICAL_PROCESS_NAMES = {
+    "system", "registry", "smss.exe", "csrss.exe", "wininit.exe",
+    "services.exe", "lsass.exe", "svchost.exe", "dwm.exe",
+    "fontdrvhost.exe", "sihost.exe", "taskhostw.exe",
+    "runtimebroker.exe", "searchhost.exe", "explorer.exe",
+}
+
+def is_critical_process(pid: int) -> bool:
+    """Guard against modifying or terminating core Windows OS processes."""
+    if pid <= 4:
+        return True
+    try:
+        proc = psutil.Process(pid)
+        name = (proc.name() or "").lower()
+        if name in CRITICAL_PROCESS_NAMES:
+            return True
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return False
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Win32 Structures
 # ──────────────────────────────────────────────────────────────────────────────
@@ -415,6 +435,10 @@ class IsolationEngine:
 
     def set_process_priority(self, pid: int, priority: str) -> bool:
         """Set the priority class of a process by PID."""
+        if is_critical_process(pid):
+            logger.warning(f"Protected system process PID {pid} cannot have priority changed")
+            return False
+
         pc = PRIORITY_CLASS_MAP.get(priority.lower())
         if pc is None:
             raise ValueError(f"Unknown priority class: {priority}")
@@ -451,6 +475,10 @@ class IsolationEngine:
         Set CPU affinity mask for a process.
         core_mask is a bitmask (e.g. 0x3 = cores 0 and 1).
         """
+        if is_critical_process(pid):
+            logger.warning(f"Protected system process PID {pid} cannot have affinity changed")
+            return False
+
         proc_handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
         if not proc_handle:
             return False
@@ -473,6 +501,9 @@ class IsolationEngine:
         This releases physical RAM pages back to the OS, simulating
         memory pressure management that the OS kernel performs.
         """
+        if is_critical_process(pid):
+            return False
+
         proc_handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
         if not proc_handle:
             return False
@@ -544,6 +575,17 @@ class IsolationEngine:
             )
             logger.info(f"Sandbox '{sandbox_name}' destroyed")
             return True
+
+    def cleanup_all_sandboxes(self):
+        """Terminate and clean up all active Job Object sandboxes on shutdown."""
+        with self._lock:
+            names = list(self._sandboxes.keys())
+            for name in names:
+                try:
+                    self.destroy_sandbox(name)
+                except Exception as e:
+                    logger.warning(f"Error destroying sandbox '{name}' during cleanup: {e}")
+            logger.info("All sandboxes cleaned up cleanly")
 
     def list_sandboxes(self) -> List[dict]:
         """List all active sandboxes with their configuration and status."""

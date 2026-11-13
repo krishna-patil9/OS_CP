@@ -63,9 +63,24 @@ const DeadlockGraph = (() => {
         // Load default circular wait scenario initially
         loadWfgScenario('circular_wait');
         loadBankerScenario('safe');
+    }
 
-        // Start animation loop for pulse effects
-        startAnimationLoop();
+    function isTabVisible() {
+        const panel = document.getElementById('panelDeadlock');
+        return panel && panel.classList.contains('active');
+    }
+
+    function onTabActivated() {
+        resizeCanvas();
+        layoutGraphNodes();
+        drawGraph();
+        if (currentResult && currentResult.has_deadlock) {
+            startAnimationLoop();
+        }
+    }
+
+    function onTabDeactivated() {
+        stopAnimationLoop();
     }
 
     function resizeCanvas() {
@@ -76,14 +91,27 @@ const DeadlockGraph = (() => {
     }
 
     function startAnimationLoop() {
+        stopAnimationLoop();
+        if (!isTabVisible() || !currentResult || !currentResult.has_deadlock) {
+            return;
+        }
         function loop() {
-            pulsePhase = (pulsePhase + 0.05) % (Math.PI * 2);
-            if (currentResult && currentResult.has_deadlock) {
-                drawGraph();
+            if (!isTabVisible()) {
+                animFrameId = null;
+                return;
             }
+            pulsePhase = (pulsePhase + 0.05) % (Math.PI * 2);
+            drawGraph();
             animFrameId = requestAnimationFrame(loop);
         }
-        loop();
+        animFrameId = requestAnimationFrame(loop);
+    }
+
+    function stopAnimationLoop() {
+        if (animFrameId) {
+            cancelAnimationFrame(animFrameId);
+            animFrameId = null;
+        }
     }
 
     async function loadWfgScenario(scenarioId) {
@@ -435,6 +463,8 @@ const DeadlockGraph = (() => {
         loadWfgScenario,
         fetchWfg,
         loadBankerScenario,
-        runBankerSafetyCheck
+        runBankerSafetyCheck,
+        onTabActivated,
+        onTabDeactivated
     };
 })();

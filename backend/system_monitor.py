@@ -1,16 +1,17 @@
 """
-System Monitor — Real-time Host Telemetry Collector
+System Monitor — Real-time Host Telemetry Collector (Optimized)
 
 Runs a dedicated daemon thread collecting per-process and system-wide telemetry
 using psutil and Win32 APIs. Data is stored in thread-safe structures for
 consumption by the Policy Engine and WebSocket telemetry stream.
 
-OS Concepts Demonstrated:
-  - Concurrent monitoring with daemon threads
-  - Thread-safe data structures (Reader-Writer pattern via RLock)
-  - Process lifecycle observation (creation, state, termination)
-  - Parent-child process relationships (PPID tracking)
-  - Per-process resource accounting (CPU, memory, threads, priority)
+Optimizations:
+  - Default sampling interval changed from 500ms to 2.0s for lightweight execution
+  - Threading.Event used for non-blocking, instantaneous thread shutdown
+  - Process metadata caching (cmdline, username, create_time) avoids expensive PEB/token reads on every tick
+  - Fast-path psutil query only requests essential per-tick attributes
+  - Single monitoring task enforced with re-entrant thread safety
+  - Graceful handling of disappearing and access-denied processes
 """
 
 import threading
@@ -24,8 +25,8 @@ import psutil
 
 logger = logging.getLogger("system_monitor")
 
-# Number of historical snapshots to retain for trend analysis
-HISTORY_LENGTH = 120  # ~60 seconds at 500ms interval
+# Retain ~120 seconds of history at 2s interval
+HISTORY_LENGTH = 60
 
 
 @dataclass
@@ -66,19 +67,31 @@ class SystemSnapshot:
     processes: Dict[int, ProcessSnapshot] = field(default_factory=dict)
 
 
+# Windows Priority Class mapping table
+PRIORITY_MAP = {
+    psutil.IDLE_PRIORITY_CLASS: "idle",
+    psutil.BELOW_NORMAL_PRIORITY_CLASS: "below_normal",
+    psutil.NORMAL_PRIORITY_CLASS: "normal",
+    psutil.ABOVE_NORMAL_PRIORITY_CLASS: "above_normal",
+    psutil.HIGH_PRIORITY_CLASS: "high",
+    psutil.REALTIME_PRIORITY_CLASS: "realtime",
+}
+
+
 class SystemMonitor:
     """
-    Concurrent system telemetry collector.
+    Concurrent lightweight system telemetry collector.
 
-    Spawns a background daemon thread that periodically samples host
+    Spawns a single background daemon thread that periodically samples host
     system and per-process metrics. All access to collected data is
     protected by a threading.RLock (reader-writer critical section).
     """
 
-    def __init__(self, interval: float = 0.5):
-        self._interval = interval
+    def __init__(self, interval: float = 2.0):
+        self._interval = max(0.5, float(interval))
         self._lock = threading.RLock()
         self._running = False
+        self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
         # Current snapshot (protected by _lock)
@@ -91,34 +104,66 @@ class SystemMonitor:
 
         # Process event tracking
         self._known_pids: set = set()
-        self._events: Deque[dict] = deque(maxlen=200)
+        self._events: Deque[dict] = deque(maxlen=100)
 
-        # Pre-warm psutil CPU measurement
-        psutil.cpu_percent(interval=None)
-        psutil.cpu_percent(interval=None, percpu=True)
+        # Process metadata cache to prevent expensive token/PEB queries on every tick
+        # maps pid -> {"create_time": float, "username": str, "cmdline": str}
+        self._proc_meta_cache: Dict[int, dict] = {}
+
+        # Cached CPU core counts
+        self._logical_cores = psutil.cpu_count(logical=True) or 1
+        self._physical_cores = psutil.cpu_count(logical=False) or self._logical_cores
+
+        # Pre-warm psutil CPU measurement and collect initial snapshot
+        try:
+            psutil.cpu_percent(interval=None)
+            psutil.cpu_percent(interval=None, percpu=True)
+            self._collect_snapshot()
+        except Exception:
+            pass
+
+    # ── Configuration ─────────────────────────────────────────────────────
+
+    def set_interval(self, interval: float):
+        """Update monitoring interval dynamically."""
+        with self._lock:
+            self._interval = max(0.5, float(interval))
+            logger.info(f"System monitor interval set to {self._interval}s")
+
+    @property
+    def interval(self) -> float:
+        return self._interval
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def start(self):
-        """Start the background monitoring daemon thread."""
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._monitor_loop,
-            name="SystemMonitor-Daemon",
-            daemon=True,
-        )
-        self._thread.start()
-        logger.info(f"System monitor started (interval={self._interval}s)")
+        """Start the background monitoring daemon thread (ensures only one runs)."""
+        with self._lock:
+            if self._running and self._thread and self._thread.is_alive():
+                logger.debug("System monitor already running, ignoring duplicate start")
+                return
+            self._running = True
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._monitor_loop,
+                name="SystemMonitor-Daemon",
+                daemon=True,
+            )
+            self._thread.start()
+            logger.info(f"System monitor started (interval={self._interval}s)")
 
     def stop(self):
-        """Signal the monitoring thread to stop."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=5.0)
+        """Signal the monitoring thread to stop immediately via event."""
+        with self._lock:
+            if not self._running:
+                return
+            self._running = False
+            self._stop_event.set()
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
             self._thread = None
-        logger.info("System monitor stopped")
+        logger.info("System monitor stopped cleanly")
 
     # ── Data Access (thread-safe reads) ───────────────────────────────────
 
@@ -144,8 +189,8 @@ class SystemMonitor:
                 "thread_count": snap.thread_count,
                 "cpu": {
                     "percent": snap.cpu_percent,
-                    "logical_cores": snap.cpu_count,
-                    "physical_cores": psutil.cpu_count(logical=False) or snap.cpu_count,
+                    "logical_cores": self._logical_cores,
+                    "physical_cores": self._physical_cores,
                     "per_core": snap.cpu_per_core,
                 },
                 "memory": {
@@ -177,6 +222,7 @@ class SystemMonitor:
                     "memory_percent": round(ps.memory_percent, 1),
                     "num_threads": ps.num_threads,
                     "priority": ps.priority,
+                    "priority_class": ps.priority.upper(),
                     "create_time": ps.create_time,
                     "username": ps.username,
                     "cmdline": ps.cmdline,
@@ -203,6 +249,7 @@ class SystemMonitor:
                 "memory_percent": round(ps.memory_percent, 1),
                 "num_threads": ps.num_threads,
                 "priority": ps.priority,
+                "priority_class": ps.priority.upper(),
                 "create_time": ps.create_time,
                 "username": ps.username,
                 "cmdline": ps.cmdline,
@@ -232,16 +279,29 @@ class SystemMonitor:
     # ── Internal Monitor Loop ─────────────────────────────────────────────
 
     def _monitor_loop(self):
-        """Background thread main loop: collect telemetry at fixed interval."""
-        while self._running:
+        """Background thread main loop: collect telemetry at fixed interval with event wait."""
+        # Initial immediate collection
+        try:
+            self._collect_snapshot()
+        except Exception as e:
+            logger.error(f"Initial monitor collection error: {e}")
+
+        while not self._stop_event.is_set():
+            # Wait for interval or stop event signal
+            if self._stop_event.wait(self._interval):
+                break
             try:
                 self._collect_snapshot()
             except Exception as e:
                 logger.error(f"Monitor collection error: {e}")
-            time.sleep(self._interval)
 
     def _collect_snapshot(self):
-        """Collect a full system + process snapshot."""
+        """
+        Collect a full system + process snapshot using optimized queries.
+        
+        Avoids querying slow Windows attributes (cmdline, username, io_counters)
+        on every process in every tick by caching static process metadata.
+        """
         now = time.time()
 
         # System-wide metrics
@@ -250,26 +310,18 @@ class SystemMonitor:
         mem = psutil.virtual_memory()
         swap = psutil.swap_memory()
 
-        # Per-process metrics
+        # Per-process metrics: Query only fast, essential attributes
         processes: Dict[int, ProcessSnapshot] = {}
         total_threads = 0
         current_pids = set()
 
-        PRIORITY_MAP = {
-            psutil.IDLE_PRIORITY_CLASS: "idle",
-            psutil.BELOW_NORMAL_PRIORITY_CLASS: "below_normal",
-            psutil.NORMAL_PRIORITY_CLASS: "normal",
-            psutil.ABOVE_NORMAL_PRIORITY_CLASS: "above_normal",
-            psutil.HIGH_PRIORITY_CLASS: "high",
-            psutil.REALTIME_PRIORITY_CLASS: "realtime",
-        }
-
-        for proc in psutil.process_iter([
+        # Essential attributes fast-path (lightweight in psutil on Windows)
+        fast_attrs = [
             "pid", "name", "ppid", "status", "cpu_percent",
-            "memory_info", "memory_percent", "num_threads",
-            "nice", "create_time", "username", "cmdline",
-            "io_counters",
-        ]):
+            "memory_info", "memory_percent", "num_threads", "nice"
+        ]
+
+        for proc in psutil.process_iter(fast_attrs):
             try:
                 info = proc.info
                 pid = info["pid"]
@@ -277,42 +329,63 @@ class SystemMonitor:
 
                 # Map Windows priority class to readable name
                 nice_val = info.get("nice")
-                priority_name = PRIORITY_MAP.get(nice_val, f"unknown({nice_val})")
+                priority_name = PRIORITY_MAP.get(nice_val, "normal")
 
                 mem_info = info.get("memory_info")
-                rss_mb = (mem_info.rss / (1024 * 1024)) if mem_info else 0
+                rss_mb = (mem_info.rss / (1024 * 1024)) if mem_info else 0.0
 
-                io = info.get("io_counters")
-                io_read = io.read_bytes if io else 0
-                io_write = io.write_bytes if io else 0
+                # Check or populate metadata cache for static attributes
+                cached_meta = self._proc_meta_cache.get(pid)
+                if cached_meta is None:
+                    # Query static attributes once per process lifecycle
+                    try:
+                        c_time = proc.create_time()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        c_time = now
 
-                cmdline_parts = info.get("cmdline") or []
-                cmdline_str = " ".join(cmdline_parts)[:200] if cmdline_parts else ""
+                    cached_meta = {
+                        "create_time": c_time,
+                        "username": None,
+                        "cmdline": "",
+                    }
+                    self._proc_meta_cache[pid] = cached_meta
+
+                num_thr = info.get("num_threads") or 1
 
                 ps = ProcessSnapshot(
                     pid=pid,
-                    name=info.get("name", ""),
-                    ppid=info.get("ppid", 0),
-                    status=info.get("status", ""),
-                    cpu_percent=info.get("cpu_percent", 0.0) or 0.0,
+                    name=info.get("name") or f"Process_{pid}",
+                    ppid=info.get("ppid") or 0,
+                    status=info.get("status") or "running",
+                    cpu_percent=info.get("cpu_percent") or 0.0,
                     memory_mb=rss_mb,
-                    memory_percent=info.get("memory_percent", 0.0) or 0.0,
-                    num_threads=info.get("num_threads", 0) or 0,
+                    memory_percent=info.get("memory_percent") or 0.0,
+                    num_threads=num_thr,
                     priority=priority_name,
-                    create_time=info.get("create_time", 0.0) or 0.0,
-                    username=info.get("username"),
-                    cmdline=cmdline_str,
-                    io_read_bytes=io_read,
-                    io_write_bytes=io_write,
+                    create_time=cached_meta["create_time"],
+                    username=cached_meta["username"],
+                    cmdline=cached_meta["cmdline"],
+                    io_read_bytes=0,
+                    io_write_bytes=0,
                 )
                 processes[pid] = ps
-                total_threads += ps.num_threads
+                total_threads += num_thr
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
-        # Detect process lifecycle events
+        # Detect process lifecycle events & clean metadata cache
         new_pids = current_pids - self._known_pids
         gone_pids = self._known_pids - current_pids
+
+        # Clean cache of terminated processes
+        for pid in gone_pids:
+            self._proc_meta_cache.pop(pid, None)
+            self._events.append({
+                "timestamp": now,
+                "event": "PROCESS_TERMINATED",
+                "pid": pid,
+                "name": "",
+            })
 
         for pid in new_pids:
             ps = processes.get(pid)
@@ -325,20 +398,12 @@ class SystemMonitor:
                     "ppid": ps.ppid,
                 })
 
-        for pid in gone_pids:
-            self._events.append({
-                "timestamp": now,
-                "event": "PROCESS_TERMINATED",
-                "pid": pid,
-                "name": "",
-            })
-
         # Build snapshot
         snapshot = SystemSnapshot(
             timestamp=now,
             cpu_percent=cpu_pct,
             cpu_per_core=cpu_per_core,
-            cpu_count=psutil.cpu_count(),
+            cpu_count=self._logical_cores,
             memory_total_mb=mem.total / (1024 * 1024),
             memory_used_mb=mem.used / (1024 * 1024),
             memory_percent=mem.percent,

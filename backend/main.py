@@ -35,7 +35,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.system_monitor import SystemMonitor
-from backend.isolation_engine import IsolationEngine, SandboxConfig
+from backend.isolation_engine import IsolationEngine, SandboxConfig, is_critical_process
 from backend.policy_engine import PolicyEngine, PolicyConfig
 from backend.deadlock_engine import WaitForGraph, BankersAlgorithm, DeadlockScenarioBuilder, ProcessNode, Resource
 from backend.simulator_engine import MLFQScheduler, MLFQProcess, MLFQConfig, PageReplacementSimulator
@@ -54,7 +54,7 @@ logger = logging.getLogger("main")
 # Initialize Core Engines
 # ──────────────────────────────────────────────────────────────────────────────
 
-monitor = SystemMonitor(interval=0.5)
+monitor = SystemMonitor(interval=2.0)
 isolation = IsolationEngine()
 policy = PolicyEngine(monitor, isolation)
 bankers = BankersAlgorithm()
@@ -62,6 +62,9 @@ page_sim = PageReplacementSimulator()
 
 # Deadlock WFG (stateful for interactive graph editing)
 wfg = WaitForGraph()
+
+# Execution Mode: "normal" (default) or "testing"
+current_execution_mode = "normal"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FastAPI App
@@ -88,9 +91,37 @@ if FRONTEND_DIR.exists():
 # Track spawned workload PIDs for cleanup
 spawned_workloads: dict = {}
 
+def kill_process_tree(pid: int, timeout: float = 2.0):
+    """Safely terminate a process and all its children to prevent orphan processes."""
+    import psutil
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        try:
+            parent.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+        _, alive = psutil.wait_procs(children + [parent], timeout=timeout)
+        for p in alive:
+            try:
+                p.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pydantic Models
 # ──────────────────────────────────────────────────────────────────────────────
+
+class ModeRequest(BaseModel):
+    mode: str  # "normal" or "testing"
 
 class SandboxCreateRequest(BaseModel):
     name: str
@@ -182,19 +213,29 @@ class WorkloadRequest(BaseModel):
 async def startup():
     monitor.start()
     policy.start()
-    logger.info("All engines started")
+    logger.info(f"All engines started [Execution Mode: {current_execution_mode.upper()}]")
 
 @app.on_event("shutdown")
 async def shutdown():
+    logger.info("Initiating graceful shutdown...")
+    # 1. Kill spawned workloads using tree-kill
+    for wid, proc in list(spawned_workloads.items()):
+        try:
+            kill_process_tree(proc.pid)
+        except Exception as e:
+            logger.warning(f"Error stopping workload {wid}: {e}")
+    spawned_workloads.clear()
+
+    # 2. Clean up Job Object sandboxes
+    try:
+        isolation.cleanup_all_sandboxes()
+    except Exception as e:
+        logger.warning(f"Error cleaning up sandboxes: {e}")
+
+    # 3. Stop policy engine and monitor threads cleanly
     policy.stop()
     monitor.stop()
-    # Kill spawned workloads
-    for name, proc in spawned_workloads.items():
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-    logger.info("All engines stopped")
+    logger.info("All engines, sandboxes, and workloads stopped cleanly")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Frontend Route
@@ -208,27 +249,58 @@ async def serve_index():
     return {"message": "Frontend not found. Place index.html in frontend/"}
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Execution Mode Control API
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/system/mode")
+async def get_execution_mode():
+    """Get the current system execution mode (normal or testing)."""
+    return {
+        "mode": current_execution_mode,
+        "description": "Normal Mode (Lightweight, Safe)" if current_execution_mode == "normal" else "Testing Mode (OS Concept Workloads Unlocked)"
+    }
+
+@app.post("/api/system/mode")
+async def set_execution_mode(req: ModeRequest):
+    """Set the system execution mode (normal or testing)."""
+    global current_execution_mode
+    mode = req.mode.lower().strip()
+    if mode not in ("normal", "testing"):
+        raise HTTPException(400, "Mode must be 'normal' or 'testing'")
+    current_execution_mode = mode
+    logger.info(f"System execution mode switched to: {current_execution_mode.upper()}")
+    return {
+        "status": "ok",
+        "mode": current_execution_mode,
+        "description": "Normal Mode (Lightweight, Safe)" if current_execution_mode == "normal" else "Testing Mode (OS Concept Workloads Unlocked)"
+    }
+
+# ──────────────────────────────────────────────────────────────────────────────
 # WebSocket: Real-Time Telemetry Stream
 # ──────────────────────────────────────────────────────────────────────────────
 
+connected_websockets: set = set()
+
 @app.websocket("/ws/telemetry")
 async def telemetry_websocket(websocket: WebSocket):
-    """Stream system telemetry at 500ms intervals via WebSocket."""
+    """Stream system telemetry at ~2.0s intervals via WebSocket."""
     await websocket.accept()
-    logger.info("WebSocket client connected")
+    connected_websockets.add(websocket)
+    logger.info(f"WebSocket client connected (active: {len(connected_websockets)})")
 
     try:
         while True:
             snapshot = monitor.get_snapshot()
             processes = monitor.get_processes()
             history = monitor.get_history()
-            decisions = policy.get_decisions(limit=20)
+            decisions = policy.get_decisions(limit=15)
             sandboxes = isolation.list_sandboxes()
             categories = policy.get_process_categories()
 
             payload = {
                 "type": "telemetry",
                 "timestamp": time.time(),
+                "mode": current_execution_mode,
                 "system": snapshot,
                 "processes": processes,
                 "history": history,
@@ -239,12 +311,14 @@ async def telemetry_websocket(websocket: WebSocket):
             }
 
             await websocket.send_json(payload)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2.0)
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.warning(f"WebSocket session closed: {e}")
+    finally:
+        connected_websockets.discard(websocket)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # REST API: System Telemetry
@@ -385,12 +459,17 @@ async def trim_process(pid: int):
 
 @app.post("/api/processes/{pid}/terminate")
 async def terminate_process(pid: int):
-    """Terminate a process by PID."""
+    """Safely terminate a process by PID (blocks Windows system processes)."""
+    if is_critical_process(pid):
+        raise HTTPException(403, f"PID {pid} is a protected Windows system process and cannot be terminated.")
     import psutil
     try:
-        proc = psutil.Process(pid)
-        proc.terminate()
+        if not psutil.pid_exists(pid):
+            raise HTTPException(404, f"Process {pid} not found")
+        kill_process_tree(pid)
         return {"status": "terminated", "pid": pid}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -632,7 +711,22 @@ WORKLOAD_DIR = Path(__file__).parent.parent / "workloads"
 
 @app.post("/api/workloads/launch")
 async def launch_workload(req: WorkloadRequest):
-    """Launch a synthetic workload process."""
+    """Launch a synthetic workload process (Requires Testing Mode)."""
+    if current_execution_mode != "testing":
+        raise HTTPException(
+            403,
+            "Workload execution is disabled in Normal Mode. "
+            "Please activate Testing Mode in the header or via POST /api/system/mode to test OS workloads."
+        )
+
+    # Restrict concurrent active workloads to protect host machine
+    active_count = sum(1 for p in spawned_workloads.values() if p.poll() is None)
+    if active_count >= 3:
+        raise HTTPException(
+            429,
+            "Maximum 3 concurrent test workloads allowed to protect laptop resources. Please stop an existing workload first."
+        )
+
     workload_map = {
         "cpu_hog": "cpu_hog.py",
         "memory_hog": "memory_hog.py",
@@ -724,12 +818,12 @@ async def list_workloads():
 
 @app.delete("/api/workloads/{workload_id}")
 async def stop_workload(workload_id: str):
-    """Stop a spawned workload."""
+    """Stop a spawned workload and all its descendant processes."""
     proc = spawned_workloads.get(workload_id)
     if not proc:
         raise HTTPException(404, f"Workload '{workload_id}' not found")
     try:
-        proc.terminate()
+        kill_process_tree(proc.pid)
         del spawned_workloads[workload_id]
         return {"status": "terminated", "workload_id": workload_id}
     except Exception as e:

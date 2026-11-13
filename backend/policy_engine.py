@@ -101,7 +101,8 @@ SYSTEM_APPS = {
     "services.exe", "lsass.exe", "svchost.exe", "dwm.exe",
     "fontdrvhost.exe", "sihost.exe", "taskhostw.exe",
     "runtimebroker.exe", "searchhost.exe", "startmenuexperiencehost.exe",
-    "shellexperiencehost.exe", "textinputhost.exe",
+    "shellexperiencehost.exe", "textinputhost.exe", "explorer.exe",
+    "spoolsv.exe", "audiodg.exe", "securityhealthservice.exe",
 }
 
 
@@ -124,6 +125,7 @@ class PolicyEngine:
         self._config = config or PolicyConfig()
         self._lock = threading.RLock()
         self._running = False
+        self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
         # Decision history
@@ -149,24 +151,30 @@ class PolicyEngine:
 
     def start(self):
         """Start the background policy evaluation loop."""
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._evaluation_loop,
-            name="PolicyEngine-Daemon",
-            daemon=True,
-        )
-        self._thread.start()
-        logger.info("Policy engine started")
+        with self._lock:
+            if self._running and self._thread and self._thread.is_alive():
+                return
+            self._running = True
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._evaluation_loop,
+                name="PolicyEngine-Daemon",
+                daemon=True,
+            )
+            self._thread.start()
+            logger.info("Policy engine started")
 
     def stop(self):
-        """Stop the policy evaluation loop."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=5.0)
+        """Stop the policy evaluation loop cleanly via event."""
+        with self._lock:
+            if not self._running:
+                return
+            self._running = False
+            self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
             self._thread = None
-        logger.info("Policy engine stopped")
+        logger.info("Policy engine stopped cleanly")
 
     # ── Configuration ─────────────────────────────────────────────────────
 
@@ -227,12 +235,13 @@ class PolicyEngine:
 
     def _evaluation_loop(self):
         """Background thread: periodically evaluate all enabled rules."""
-        while self._running:
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(self._config.evaluation_interval):
+                break
             try:
                 self._evaluate()
             except Exception as e:
                 logger.error(f"Policy evaluation error: {e}")
-            time.sleep(self._config.evaluation_interval)
 
     def _evaluate(self):
         """Run all enabled policy rules against current system state."""
@@ -288,7 +297,7 @@ class PolicyEngine:
             pid = p["pid"]
             name = (p["name"] or "").lower()
 
-            if name in SYSTEM_APPS:
+            if pid in (0, 4) or name in SYSTEM_APPS:
                 cat = ProcessCategory.SYSTEM
             elif name in INTERACTIVE_APPS:
                 cat = ProcessCategory.INTERACTIVE

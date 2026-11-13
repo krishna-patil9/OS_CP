@@ -1,10 +1,11 @@
 /**
- * workloads.js — Synthetic Workload Suite Controller
+ * workloads.js — Synthetic Workload Suite Controller (Safe & Controlled)
  * 
  * Manages:
- *   - Launching synthetic workloads: CPU Hog, Memory Hog, Mutex Deadlock Inversion, and Sandboxed App
- *   - Automatic sandbox creation & assignment for capped runs
- *   - Active spawned workloads monitoring table & inline termination
+ *   - Controlled launching of synthetic workloads: CPU Hog, Memory Hog, Mutex Deadlock Inversion, and Sandboxed App
+ *   - Enforcing execution mode check (Testing Mode required)
+ *   - Enforcing safe default arguments to prevent personal laptop overheating
+ *   - Safe polling only when the Workloads tab is active
  */
 
 const Workloads = (() => {
@@ -27,19 +28,53 @@ const Workloads = (() => {
         if (btnDeadlock) btnDeadlock.addEventListener('click', launchDeadlockDemo);
         if (btnSandbox) btnSandbox.addEventListener('click', launchSandboxedApp);
         if (btnRefresh) btnRefresh.addEventListener('click', fetchWorkloads);
-
-        fetchWorkloads();
-        refreshTimer = setInterval(fetchWorkloads, 2000);
     }
 
-    async function launchCpuHog(capped = false) {
-        const threads = document.getElementById('cpuHogThreads')?.value || '2';
-        const duration = document.getElementById('cpuHogDuration')?.value || '60';
+    function isTabVisible() {
+        const panel = document.getElementById('panelWorkloads');
+        return panel && panel.classList.contains('active');
+    }
+
+    function onTabActivated() {
+        fetchWorkloads();
+        if (!refreshTimer) {
+            refreshTimer = setInterval(fetchWorkloads, 3000);
+        }
+    }
+
+    function onTabDeactivated() {
+        if (refreshTimer) {
+            clearInterval(refreshTimer);
+            refreshTimer = null;
+        }
+    }
+
+    function checkTestingMode() {
+        if (typeof App !== 'undefined' && App.getExecutionMode && App.getExecutionMode() !== 'testing') {
+            App.showToast('Normal Mode Active: Stress tests are locked. Click "Testing Mode" in the header to unlock.', 'warning');
+            return false;
+        }
+        return true;
+    }
+
+    async function launchCpuHog(capped = true) {
+        if (!checkTestingMode()) return;
+
+        const rawThreads = parseInt(document.getElementById('cpuHogThreads')?.value) || 1;
+        const rawDuration = parseInt(document.getElementById('cpuHogDuration')?.value) || 15;
+
+        // Enforce safe laptop bounds
+        const threads = Math.min(2, Math.max(1, rawThreads));
+        const duration = Math.min(30, Math.max(5, rawDuration));
+
+        const modeDesc = capped ? 'inside a 20% CPU Rate Cap Job Object' : 'controlled (1-2 threads, duty-cycled)';
+        if (!confirm(`Launch safe CPU Hog (${threads} thread(s), ${duration}s max duration, ${modeDesc})?`)) {
+            return;
+        }
 
         let sandboxName = null;
         if (capped) {
             sandboxName = 'cpu_hog_20pct_sandbox';
-            // Ensure sandbox exists
             await ensureSandboxExists(sandboxName, {
                 cpu_rate_percent: 20,
                 priority_class: 'BELOW_NORMAL_PRIORITY_CLASS'
@@ -52,7 +87,7 @@ const Workloads = (() => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workload_type: 'cpu_hog',
-                    args: ['--threads', String(threads), '--duration', String(duration)],
+                    args: ['--threads', String(threads), '--duration', String(duration), '--intensity', capped ? '30' : '50'],
                     sandbox_name: sandboxName
                 })
             });
@@ -60,22 +95,33 @@ const Workloads = (() => {
             if (res.ok) {
                 const data = await res.json();
                 App.showToast(
-                    `Launched CPU Hog (PID ${data.pid})${capped ? ' inside 20% Job Object cap' : ' (Uncapped)'}`,
-                    capped ? 'info' : 'warning'
+                    `Launched CPU Hog (PID ${data.pid})${capped ? ' inside 20% Job Object cap' : ' (Controlled)'}`,
+                    'info'
                 );
                 fetchWorkloads();
             } else {
                 const err = await res.json();
-                App.showToast(`Launch failed: ${err.detail || 'Error'}`, 'error');
+                App.showToast(`Launch blocked: ${err.detail || 'Error'}`, 'error');
             }
         } catch (e) {
             App.showToast(`Error: ${e.message}`, 'error');
         }
     }
 
-    async function launchMemHog(capped = false) {
-        const maxMb = document.getElementById('memHogMax')?.value || '150';
-        const chunkMb = document.getElementById('memHogChunk')?.value || '10';
+    async function launchMemHog(capped = true) {
+        if (!checkTestingMode()) return;
+
+        const rawMax = parseInt(document.getElementById('memHogMax')?.value) || 40;
+        const rawChunk = parseInt(document.getElementById('memHogChunk')?.value) || 5;
+
+        // Safe laptop bounds
+        const maxMb = Math.min(60, Math.max(10, rawMax));
+        const chunkMb = Math.min(10, Math.max(1, rawChunk));
+
+        const modeDesc = capped ? 'inside a 50MB hard Job Object cap' : 'controlled memory test';
+        if (!confirm(`Launch safe Memory Hog (Target: ${maxMb} MB, ${chunkMb} MB chunks, ${modeDesc})?`)) {
+            return;
+        }
 
         let sandboxName = null;
         if (capped) {
@@ -92,7 +138,7 @@ const Workloads = (() => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workload_type: 'memory_hog',
-                    args: ['--max-mb', String(maxMb), '--chunk-mb', String(chunkMb)],
+                    args: ['--max-mb', String(maxMb), '--chunk-mb', String(chunkMb), '--hold-duration', '15'],
                     sandbox_name: sandboxName
                 })
             });
@@ -100,13 +146,13 @@ const Workloads = (() => {
             if (res.ok) {
                 const data = await res.json();
                 App.showToast(
-                    `Launched Memory Hog (PID ${data.pid})${capped ? ' inside 50MB hard Job Object cap' : ' (Uncapped)'}`,
-                    capped ? 'info' : 'warning'
+                    `Launched Memory Hog (PID ${data.pid})${capped ? ' inside 50MB hard Job Object cap' : ' (Controlled)'}`,
+                    'info'
                 );
                 fetchWorkloads();
             } else {
                 const err = await res.json();
-                App.showToast(`Launch failed: ${err.detail || 'Error'}`, 'error');
+                App.showToast(`Launch blocked: ${err.detail || 'Error'}`, 'error');
             }
         } catch (e) {
             App.showToast(`Error: ${e.message}`, 'error');
@@ -114,13 +160,19 @@ const Workloads = (() => {
     }
 
     async function launchDeadlockDemo() {
+        if (!checkTestingMode()) return;
+
+        if (!confirm('Launch synthetic Mutex Deadlock demonstration (2 threads, circular wait, 15s watchdog timeout)?')) {
+            return;
+        }
+
         try {
             const res = await fetch('/api/workloads/launch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workload_type: 'deadlock_demo',
-                    args: ['--workers', '2', '--delay', '0.5']
+                    args: ['--workers', '2', '--delay', '0.5', '--timeout', '15']
                 })
             });
 
@@ -130,7 +182,7 @@ const Workloads = (() => {
                 fetchWorkloads();
             } else {
                 const err = await res.json();
-                App.showToast(`Launch failed: ${err.detail || 'Error'}`, 'error');
+                App.showToast(`Launch blocked: ${err.detail || 'Error'}`, 'error');
             }
         } catch (e) {
             App.showToast(`Error: ${e.message}`, 'error');
@@ -138,10 +190,16 @@ const Workloads = (() => {
     }
 
     async function launchSandboxedApp() {
+        if (!checkTestingMode()) return;
+
+        if (!confirm('Launch Untrusted Sandboxed App inside a Windows NT Job Object (15% CPU cap, 50MB RAM limit, max 3 processes)?')) {
+            return;
+        }
+
         const sandboxName = 'untrusted_restricted_sandbox';
         await ensureSandboxExists(sandboxName, {
             cpu_rate_percent: 15,
-            memory_limit_mb: 80,
+            memory_limit_mb: 50,
             max_active_processes: 3,
             priority_class: 'IDLE_PRIORITY_CLASS'
         });
@@ -152,18 +210,18 @@ const Workloads = (() => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workload_type: 'sandboxed_app',
-                    args: [],
+                    args: ['--threads', '1', '--memory-mb', '30', '--duration', '20'],
                     sandbox_name: sandboxName
                 })
             });
 
             if (res.ok) {
                 const data = await res.json();
-                App.showToast(`Launched Sandboxed App (PID ${data.pid}) under Low Integrity Token & Job Object!`, 'success');
+                App.showToast(`Launched Sandboxed App (PID ${data.pid}) under Job Object isolation!`, 'success');
                 fetchWorkloads();
             } else {
                 const err = await res.json();
-                App.showToast(`Launch failed: ${err.detail || 'Error'}`, 'error');
+                App.showToast(`Launch blocked: ${err.detail || 'Error'}`, 'error');
             }
         } catch (e) {
             App.showToast(`Error: ${e.message}`, 'error');
@@ -182,7 +240,7 @@ const Workloads = (() => {
                 })
             });
         } catch (e) {
-            // Already exists or creation logged
+            // Already exists or handled
         }
     }
 
@@ -243,7 +301,7 @@ const Workloads = (() => {
                     <td style="font-family: var(--font-mono);">${w.return_code !== null ? w.return_code : '-'}</td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick="Workloads.stopWorkload('${escapeHtml(w.workload_id)}')">
-                            🛑 Terminate
+                            🛑 Stop
                         </button>
                     </td>
                 </tr>
@@ -266,6 +324,8 @@ const Workloads = (() => {
     return {
         init,
         fetchWorkloads,
-        stopWorkload
+        stopWorkload,
+        onTabActivated,
+        onTabDeactivated
     };
 })();

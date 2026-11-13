@@ -21,6 +21,10 @@
             </div>
             <div class="header-status">
                 <div class="status-indicator">
+                    <span id="modeBadge" class="mode-badge normal">🛡️ Normal Mode</span>
+                    <button id="btnToggleMode" class="btn btn-sm btn-outline" style="margin-left: 8px;">⚡ Activate Testing Mode</button>
+                </div>
+                <div class="status-indicator">
                     <span id="wsStatusDot" class="status-dot offline"></span>
                     <span id="wsStatusText">Connecting...</span>
                 </div>
@@ -550,54 +554,67 @@
             <!-- TAB 5: SYNTHETIC WORKLOAD SUITE                                -->
             <!-- ═══════════════════════════════════════════════════════════════ -->
             <section id="panelWorkloads" class="tab-panel" role="tabpanel">
+                <!-- Mode Protection Banner -->
+                <div id="workloadLockBanner" class="workload-lock-banner">
+                    <div>
+                        <div style="font-weight: 700; color: var(--accent-indigo); font-size: 0.9rem; margin-bottom: 2px;">
+                            🛡️ Normal Mode Active — Laptop Protection Safeguard
+                        </div>
+                        <div style="font-size: 0.75rem; color: var(--text-secondary);">
+                            To keep your personal machine cool, stable, and responsive, stress workloads require explicit activation of <strong>Testing Mode</strong>. All other OS modules (Telemetry, Sandbox Manager, Deadlock Cycle Detection, Banker's Algorithm, MLFQ &amp; Page Replacement) remain fully operational.
+                        </div>
+                    </div>
+                    <button class="btn btn-sm btn-primary" onclick="App.toggleExecutionMode()">⚡ Activate Testing Mode</button>
+                </div>
+
                 <div class="grid-2" style="margin-bottom: var(--space-lg);">
                     <!-- CPU Hog Card -->
                     <div class="card">
                         <div class="card-header">
-                            <div class="card-title"><span class="icon">🔥</span> CPU Hog Workload</div>
-                            <span class="card-badge" style="background: var(--accent-rose-glow); color: var(--accent-rose);">Stress Test</span>
+                            <div class="card-title"><span class="icon">🔥</span> CPU Hog Workload (Controlled)</div>
+                            <span class="card-badge" style="background: var(--accent-rose-glow); color: var(--accent-rose);">Safe Lab Test</span>
                         </div>
                         <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
-                            Launches a synthetic multi-threaded CPU spinner that consumes 100% of an allocated core. Watch the <strong>Intelligent Policy Engine</strong> automatically detect the abnormal consumption and throttle it or assign it to a Job Object cap!
+                            Runs duty-cycled prime calculation worker thread(s) with enforced maximum execution duration (max 30s) and thread limits (max 2) to demonstrate CPU throttling without overheating your CPU.
                         </p>
                         <div class="form-row" style="margin-bottom: var(--space-md);">
                             <div class="form-group">
-                                <label class="form-label" for="cpuHogThreads">Threads</label>
-                                <input type="number" id="cpuHogThreads" class="form-input" value="2" min="1" max="8">
+                                <label class="form-label" for="cpuHogThreads">Threads (Safe: 1-2)</label>
+                                <input type="number" id="cpuHogThreads" class="form-input" value="1" min="1" max="2">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" for="cpuHogDuration">Duration (sec)</label>
-                                <input type="number" id="cpuHogDuration" class="form-input" value="60" min="10" max="300">
+                                <label class="form-label" for="cpuHogDuration">Duration (sec, Max 30s)</label>
+                                <input type="number" id="cpuHogDuration" class="form-input" value="15" min="5" max="30">
                             </div>
                         </div>
                         <div class="btn-group">
-                            <button class="btn btn-danger" id="btnLaunchCpuHog">🚀 Launch Unrestricted CPU Hog</button>
                             <button class="btn btn-primary" id="btnLaunchCpuHogCapped">🛡️ Launch Inside 20% Cap Sandbox</button>
+                            <button class="btn btn-outline" id="btnLaunchCpuHog">🚀 Launch Controlled CPU Hog</button>
                         </div>
                     </div>
 
                     <!-- Memory Hog Card -->
                     <div class="card">
                         <div class="card-header">
-                            <div class="card-title"><span class="icon">🧠</span> Memory Hog Workload</div>
-                            <span class="card-badge" style="background: var(--accent-cyan-glow); color: var(--accent-cyan);">Thrashing Test</span>
+                            <div class="card-title"><span class="icon">🧠</span> Memory Hog Workload (Bounded)</div>
+                            <span class="card-badge" style="background: var(--accent-cyan-glow); color: var(--accent-cyan);">Memory Cap Test</span>
                         </div>
                         <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
-                            Continuously allocates private heap pages in 10MB increments up to a ceiling. When launched inside an isolated Job Object with a 50MB hard limit, the Windows NT Kernel triggers an out-of-memory exception or terminates the process safely without freezing your system.
+                            Allocates memory in small 5MB chunks up to a conservative ceiling (max 60MB). When enclosed in a 50MB Job Object, the OS kernel enforces quota boundaries safely and auto-releases on finish.
                         </p>
                         <div class="form-row" style="margin-bottom: var(--space-md);">
                             <div class="form-group">
-                                <label class="form-label" for="memHogMax">Target Alloc (MB)</label>
-                                <input type="number" id="memHogMax" class="form-input" value="150" min="20" max="1000">
+                                <label class="form-label" for="memHogMax">Target Alloc (MB, Max 60MB)</label>
+                                <input type="number" id="memHogMax" class="form-input" value="40" min="10" max="60">
                             </div>
                             <div class="form-group">
                                 <label class="form-label" for="memHogChunk">Chunk Size (MB)</label>
-                                <input type="number" id="memHogChunk" class="form-input" value="10" min="1" max="50">
+                                <input type="number" id="memHogChunk" class="form-input" value="5" min="1" max="10">
                             </div>
                         </div>
                         <div class="btn-group">
-                            <button class="btn btn-primary" id="btnLaunchMemHog">🚀 Launch Memory Hog</button>
                             <button class="btn btn-success" id="btnLaunchMemHogCapped">🛡️ Launch Inside 50MB Hard Limit</button>
+                            <button class="btn btn-primary" id="btnLaunchMemHog">🚀 Launch Controlled Memory Hog</button>
                         </div>
                     </div>
 
@@ -608,10 +625,10 @@
                             <span class="card-badge" style="background: var(--accent-amber-glow); color: var(--accent-amber);">Concurrency Test</span>
                         </div>
                         <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
-                            Launches synthetic worker threads acquiring two shared mutexes (Lock A and Lock B) in reversed order: Thread 1 acquires (A &rarr; B) while Thread 2 acquires (B &rarr; A). Demonstrates true mutual exclusion circular wait.
+                            Launches synthetic worker threads acquiring two shared mutexes in reversed order with a 15s watchdog timeout, allowing safe observation of mutual exclusion circular wait without freezing the system.
                         </p>
                         <button class="btn btn-primary" id="btnLaunchDeadlockDemo">
-                            ⚡ Spawn Real Thread Deadlock
+                            ⚡ Spawn Thread Deadlock (15s Watchdog)
                         </button>
                     </div>
 
@@ -622,10 +639,10 @@
                             <span class="card-badge">Restricted Token</span>
                         </div>
                         <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: var(--space-md);">
-                            Simulates an untrusted binary executing with Low Integrity Security Token, active process limits, and strict memory/CPU boundaries. Tests fork-bomb resilience and hard kill-on-close guarantees.
+                            Executes a bounded synthetic workload enclosed inside a Windows NT Job Object (15% CPU rate cap, 50MB RAM limit, max 3 processes) to verify kernel isolation boundaries.
                         </p>
                         <button class="btn btn-primary" id="btnLaunchSandboxedApp">
-                            🛡️ Launch in Low-Integrity Sandbox
+                            🛡️ Launch in Job Object Sandbox
                         </button>
                     </div>
                 </div>
