@@ -158,7 +158,8 @@ const DeadlockGraph = (() => {
         }
 
         const dpr = window.devicePixelRatio || 1;
-        const cssWidth = Math.max(340, w);
+        const parentWidth = parent ? (parent.clientWidth || w) : w;
+        const cssWidth = Math.min(Math.max(280, w), parentWidth || 600);
         const cssHeight = 360;
 
         canvas.style.width = `${cssWidth}px`;
@@ -167,8 +168,7 @@ const DeadlockGraph = (() => {
         canvas.height = Math.floor(cssHeight * dpr);
 
         if (ctx) {
-            ctx.resetTransform?.();
-            ctx.scale(dpr, dpr);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         }
     }
 
@@ -212,7 +212,7 @@ const DeadlockGraph = (() => {
         if (btnDetect) btnDetect.disabled = loading;
 
         if (loading && title) {
-            title.innerHTML = `⏳ <span style="color: var(--text-secondary);">${message}</span>`;
+            title.innerHTML = `<span style="color: var(--text-secondary);">${message}</span>`;
         }
     }
 
@@ -245,7 +245,7 @@ const DeadlockGraph = (() => {
             console.error('Failed to load WFG scenario:', e);
             if (!scenarioCache[scenarioId]) {
                 const title = document.getElementById('wfgStatusTitle');
-                if (title) title.innerHTML = `⚠️ <span style="color: var(--accent-rose);">Failed to load scenario: ${e.message}</span>`;
+                if (title) title.innerHTML = `<span style="color: var(--status-danger-text); font-weight: 600;">Failed to load scenario: ${e.message}</span>`;
             }
         } finally {
             setLoadingState(false);
@@ -266,7 +266,7 @@ const DeadlockGraph = (() => {
                 applyGraphData(data);
                 if (isManual) {
                     App.showToast(
-                        data.result.has_deadlock ? '⚠️ Deadlock cycle detected!' : '✅ No deadlock detected',
+                        data.result.has_deadlock ? 'Deadlock cycle detected!' : 'No deadlock detected',
                         data.result.has_deadlock ? 'error' : 'success'
                     );
                 }
@@ -363,7 +363,7 @@ const DeadlockGraph = (() => {
 
         if (nodes.length === 0) {
             ctx.save();
-            ctx.fillStyle = '#64748b';
+            ctx.fillStyle = '#625D62';
             ctx.font = '13px "Inter", sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -415,24 +415,22 @@ const DeadlockGraph = (() => {
 
         ctx.save();
 
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
         if (isVictim) {
-            // Glowing amber halo for optimal victim
-            const pulse = Math.sin(pulsePhase) * 6 + 12;
-            ctx.shadowColor = '#f59e0b';
-            ctx.shadowBlur = pulse;
-            ctx.strokeStyle = '#f59e0b';
-            ctx.lineWidth = 3;
+            // Subtle stroke width pulse without neon blur
+            const pulse = Math.sin(pulsePhase) * 0.6 + 2.6;
+            ctx.strokeStyle = '#B98532';
+            ctx.lineWidth = pulse;
         } else if (isDeadlocked) {
-            // Glowing crimson halo for deadlock cycle
-            const pulse = Math.sin(pulsePhase) * 6 + 10;
-            ctx.shadowColor = '#f43f5e';
-            ctx.shadowBlur = pulse;
-            ctx.strokeStyle = '#f43f5e';
-            ctx.lineWidth = 2.5;
+            // Subtle stroke width pulse without neon blur
+            const pulse = Math.sin(pulsePhase) * 0.5 + 2.4;
+            ctx.strokeStyle = '#C85D5D';
+            ctx.lineWidth = pulse;
         } else {
-            ctx.shadowColor = 'transparent';
-            ctx.strokeStyle = isProc ? '#6366f1' : '#06b6d4';
-            ctx.lineWidth = 2;
+            ctx.strokeStyle = isProc ? '#52748D' : '#298F93';
+            ctx.lineWidth = 1.8;
         }
 
         if (isProc) {
@@ -440,24 +438,23 @@ const DeadlockGraph = (() => {
             const r = 24;
             ctx.beginPath();
             ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fillStyle = isVictim ? 'rgba(245, 158, 11, 0.28)' : (isDeadlocked ? 'rgba(244, 63, 94, 0.28)' : 'rgba(99, 102, 241, 0.2)');
+            ctx.fillStyle = isVictim ? 'rgba(185, 133, 50, 0.16)' : (isDeadlocked ? 'rgba(200, 93, 93, 0.16)' : 'rgba(82, 116, 141, 0.12)');
             ctx.fill();
             ctx.stroke();
 
             // Label
-            ctx.shadowColor = 'transparent';
-            ctx.fillStyle = '#f1f5f9';
+            ctx.fillStyle = '#323035';
             ctx.font = 'bold 11px "JetBrains Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText(node.label || node.name || node.id, x, y - 2);
 
             if (isVictim) {
-                ctx.fillStyle = '#f59e0b';
+                ctx.fillStyle = '#6E490D';
                 ctx.font = 'bold 8px "Inter", sans-serif';
                 ctx.fillText('VICTIM', x, y + 10);
             } else if (node.priority !== undefined) {
-                ctx.fillStyle = '#94a3b8';
+                ctx.fillStyle = '#625D62';
                 ctx.font = '8px "Inter", sans-serif';
                 ctx.fillText(`pri: ${node.priority}`, x, y + 10);
             }
@@ -470,20 +467,19 @@ const DeadlockGraph = (() => {
 
             ctx.beginPath();
             ctx.roundRect(rx, ry, rw, rh, 6);
-            ctx.fillStyle = isDeadlocked ? 'rgba(244, 63, 94, 0.28)' : 'rgba(6, 182, 212, 0.2)';
+            ctx.fillStyle = isDeadlocked ? 'rgba(200, 93, 93, 0.16)' : 'rgba(41, 143, 147, 0.12)';
             ctx.fill();
             ctx.stroke();
 
             // Label
-            ctx.shadowColor = 'transparent';
-            ctx.fillStyle = '#06b6d4';
+            ctx.fillStyle = '#21777B';
             ctx.font = 'bold 10px "JetBrains Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText(node.label || node.name || node.id, x, y - 4);
 
             // Instances count
-            ctx.fillStyle = '#94a3b8';
+            ctx.fillStyle = '#625D62';
             ctx.font = '9px "JetBrains Mono", monospace';
             const total = node.total !== undefined ? node.total : (node.instances || 1);
             const inst = node.available !== undefined ? `${node.available}/${total} inst` : `${total} inst`;
@@ -510,8 +506,8 @@ const DeadlockGraph = (() => {
         const endX = toX - (dx / dist) * nodeRadius;
         const endY = toY - (dy / dist) * nodeRadius;
 
-        ctx.strokeStyle = isDeadlocked ? '#f43f5e' : (style === 'dashed' ? 'rgba(245, 158, 11, 0.75)' : 'rgba(99, 102, 241, 0.75)');
-        ctx.lineWidth = isDeadlocked ? 2.5 : 1.8;
+        ctx.strokeStyle = isDeadlocked ? '#C85D5D' : (style === 'dashed' ? '#B98532' : '#52748D');
+        ctx.lineWidth = isDeadlocked ? 2.2 : 1.6;
 
         if (style === 'dashed') {
             ctx.setLineDash([5, 4]);
@@ -526,7 +522,7 @@ const DeadlockGraph = (() => {
 
         // Arrowhead
         const angle = Math.atan2(endY - startY, endX - startX);
-        const headLen = 10;
+        const headLen = 9;
 
         ctx.setLineDash([]);
         ctx.fillStyle = ctx.strokeStyle;
@@ -541,7 +537,7 @@ const DeadlockGraph = (() => {
         if (label && dist > 70) {
             const midX = (startX + endX) / 2;
             const midY = (startY + endY) / 2;
-            ctx.fillStyle = isDeadlocked ? '#fca5a5' : '#94a3b8';
+            ctx.fillStyle = isDeadlocked ? '#7E2B2B' : '#625D62';
             ctx.font = '8px "JetBrains Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -559,25 +555,25 @@ const DeadlockGraph = (() => {
         if (!res || !box) return;
 
         if (res.has_deadlock) {
-            box.style.borderColor = 'rgba(244, 63, 94, 0.5)';
-            box.style.background = 'rgba(244, 63, 94, 0.08)';
+            box.style.borderColor = 'var(--status-danger)';
+            box.style.background = 'var(--status-danger-bg)';
             const cycleCount = res.cycles?.length || 1;
             const cyclePath = res.cycles && res.cycles[0] ? res.cycles[0].join(' &rarr; ') : '';
-            
-            title.innerHTML = `⚠️ <span style="color: var(--accent-rose);">DEADLOCK DETECTED (${cycleCount} Circular Wait Cycle${cycleCount > 1 ? 's' : ''})</span>`;
+
+            title.innerHTML = `<span style="color: var(--status-danger-text); font-weight: 700;">DEADLOCK DETECTED (${cycleCount} Circular Wait Cycle${cycleCount > 1 ? 's' : ''})</span>`;
             detail.innerHTML = `
-                ${cyclePath ? `<div style="margin-bottom: 4px; font-family: var(--font-mono); font-size: 0.78rem; color: #fecdd3;"><strong>Cycle:</strong> ${cyclePath}</div>` : ''}
-                <div><strong>Involved Processes:</strong> ${res.involved_processes?.join(', ') || 'None'}</div>
-                <div><strong>Contended Resources:</strong> ${res.involved_resources?.join(', ') || 'None'}</div>
-                <div style="margin-top: 6px; color: var(--accent-amber);">
-                    🎯 <strong>Optimal Preemption Victim:</strong> ${res.recommended_victim || 'None'} 
-                    <br><span style="font-size: 0.72rem; color: var(--text-tertiary);">${res.victim_reason || ''}</span>
+                ${cyclePath ? `<div style="margin-bottom: 6px; font-family: var(--font-mono); font-size: 0.8rem; color: var(--status-danger-text);"><strong>Cycle:</strong> ${cyclePath}</div>` : ''}
+                <div style="color: var(--text-primary); margin-bottom: 2px;"><strong>Involved Processes:</strong> ${res.involved_processes?.join(', ') || 'None'}</div>
+                <div style="color: var(--text-primary); margin-bottom: 4px;"><strong>Contended Resources:</strong> ${res.involved_resources?.join(', ') || 'None'}</div>
+                <div style="margin-top: 6px; color: var(--status-warning-text); font-weight: 600;">
+                    Optimal Preemption Victim: ${res.recommended_victim || 'None'}
+                    <br><span style="font-size: 0.76rem; font-weight: 400; color: var(--text-secondary);">${res.victim_reason || ''}</span>
                 </div>
             `;
         } else {
-            box.style.borderColor = 'rgba(16, 185, 129, 0.5)';
-            box.style.background = 'rgba(16, 185, 129, 0.08)';
-            title.innerHTML = `✅ <span style="color: var(--accent-emerald);">SAFE — No Circular Wait Condition Detected</span>`;
+            box.style.borderColor = 'var(--status-success)';
+            box.style.background = 'var(--status-success-bg)';
+            title.innerHTML = `<span style="color: var(--status-success-text); font-weight: 700;">SAFE — No Circular Wait Condition Detected</span>`;
             detail.textContent = 'All requested resources can be granted or scheduled without cyclic blocking.';
         }
     }
@@ -660,10 +656,10 @@ const DeadlockGraph = (() => {
 
             html += `
                 <tr>
-                    <td style="font-weight: 700; color: var(--accent-indigo);">${procs[i]}</td>
+                    <td style="font-weight: 700; color: var(--accent-hover);">${procs[i]}</td>
                     <td>[ ${allocStr} ]</td>
                     <td>[ ${maxStr} ]</td>
-                    <td style="color: var(--accent-cyan); font-weight: 600;">[ ${needStr} ]</td>
+                    <td style="color: var(--status-info-text); font-weight: 600;">[ ${needStr} ]</td>
                 </tr>
             `;
         }
@@ -674,16 +670,16 @@ const DeadlockGraph = (() => {
             if (result.is_safe) {
                 resultBox.className = 'banker-result safe';
                 resultBox.innerHTML = `
-                    <div style="font-size: 0.9rem; margin-bottom: 4px;">✅ System State is <strong>SAFE</strong></div>
-                    <div style="font-size: 0.78rem; font-family: var(--font-mono);">
+                    <div style="font-size: 0.9rem; margin-bottom: 4px;">System State is <strong>SAFE</strong></div>
+                    <div style="font-size: 0.8rem; font-family: var(--font-mono);">
                         Safe Execution Sequence: <strong>${result.safe_sequence ? result.safe_sequence.join(' &rarr; ') : 'None'}</strong>
                     </div>
                 `;
             } else {
                 resultBox.className = 'banker-result unsafe';
                 resultBox.innerHTML = `
-                    <div style="font-size: 0.9rem; margin-bottom: 4px;">❌ System State is <strong>UNSAFE (Deadlock Risk)</strong></div>
-                    <div style="font-size: 0.78rem;">
+                    <div style="font-size: 0.9rem; margin-bottom: 4px;">System State is <strong>UNSAFE (Deadlock Risk)</strong></div>
+                    <div style="font-size: 0.8rem;">
                         No safe execution sequence exists. Available resources cannot guarantee completion without preemption.
                     </div>
                 `;

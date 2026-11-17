@@ -185,7 +185,9 @@ const Isolation = (() => {
         if (cachedSandboxes.length === 0) {
             container.innerHTML = `
                 <div class="empty-state" style="grid-column: 1 / -1;">
-                    <div class="empty-state-icon">🛡️</div>
+                    <div class="empty-state-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" style="width:32px;height:32px;stroke:currentColor;fill:none;stroke-width:1.75;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                    </div>
                     <div class="empty-state-text">No active Job Objects created yet. Use the form on the left or launch a sandboxed workload.</div>
                 </div>
             `;
@@ -203,10 +205,10 @@ const Isolation = (() => {
             html += `
                 <div class="sandbox-card">
                     <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: var(--space-sm);">
-                        <div class="sandbox-name">🛡️ ${escapeHtml(sb.name)}</div>
+                        <div class="sandbox-name">${escapeHtml(sb.name)}</div>
                         <div class="btn-group">
-                            <button class="btn btn-sm" title="Inspect Kernel Accounting" onclick="Isolation.inspectAccounting('${escapeHtml(sb.name)}')">📊</button>
-                            <button class="btn btn-sm btn-danger" title="Destroy Sandbox" onclick="Isolation.destroySandbox('${escapeHtml(sb.name)}')">🗑️</button>
+                            <button class="btn btn-sm" title="Inspect Kernel Accounting" onclick="Isolation.inspectAccounting('${escapeHtml(sb.name)}')">Accounting</button>
+                            <button class="btn btn-sm btn-danger" title="Destroy Sandbox" onclick="Isolation.destroySandbox('${escapeHtml(sb.name)}')">Destroy</button>
                         </div>
                     </div>
 
