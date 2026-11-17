@@ -165,7 +165,9 @@ const App = (() => {
         if (tabName === 'telemetry' && typeof Telemetry !== 'undefined' && Telemetry.onTabActivated) {
             Telemetry.onTabActivated();
         } else if (tabName === 'deadlock' && typeof DeadlockGraph !== 'undefined' && DeadlockGraph.onTabActivated) {
-            DeadlockGraph.onTabActivated();
+            requestAnimationFrame(() => {
+                DeadlockGraph.onTabActivated();
+            });
         } else if (tabName === 'workloads' && typeof Workloads !== 'undefined' && Workloads.onTabActivated) {
             Workloads.onTabActivated();
         }

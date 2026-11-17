@@ -2,18 +2,26 @@
  * deadlock_graph.js — Wait-For Graph Canvas Renderer & Banker's Algorithm Visualizer
  * 
  * Demonstrates:
- *   - Resource Allocation Graph (RAG) / Wait-For Graph (WFG) cycle detection (Tarjan's DFS)
- *   - Interactive HTML5 Canvas rendering of process & resource nodes and directed dependencies
- *   - Deadlock cycle highlight in glowing crimson and optimal victim selection
+ *   - Resource Allocation Graph (RAG) & Wait-For Graph (WFG) cycle detection (Tarjan's DFS)
+ *   - Dual View Modes: RAG (Process + Resource nodes) and WFG (Pure Process Wait-For)
+ *   - Interactive HTML5 Canvas rendering with High-DPI support and instant caching
+ *   - Deadlock cycle highlight in glowing crimson and optimal victim preemption selection
  *   - Dijkstra's Banker's Algorithm state evaluation with dynamic matrix tables
  */
 
 const DeadlockGraph = (() => {
     let canvas, ctx;
-    let currentGraph = { nodes: [], edges: [] };
+    let currentGraph = { nodes: [], edges: [], rag_edges: [], wfg_edges: [] };
     let currentResult = null;
     let animFrameId = null;
     let pulsePhase = 0;
+    let currentScenarioId = 'circular_wait';
+    let currentViewMode = 'rag'; // 'rag' (Process + Resource) or 'wfg' (Process only)
+    let isFetching = false;
+
+    // Fast-path client caches for instantaneous switching (0ms latency)
+    const scenarioCache = {};
+    const bankerCache = {};
 
     // Banker's Algorithm current state
     let bankerState = null;
@@ -25,6 +33,7 @@ const DeadlockGraph = (() => {
             resizeCanvas();
             window.addEventListener('resize', () => {
                 resizeCanvas();
+                layoutGraphNodes();
                 drawGraph();
             });
         }
@@ -33,16 +42,27 @@ const DeadlockGraph = (() => {
         const btnLoadWfg = document.getElementById('btnLoadWfgScenario');
         const btnDetect = document.getElementById('btnDetectDeadlock');
         const scenarioSelect = document.getElementById('wfgScenarioSelect');
+        const btnToggleMode = document.getElementById('btnToggleGraphView');
 
         if (btnLoadWfg) {
             btnLoadWfg.addEventListener('click', () => {
                 const scen = scenarioSelect?.value || 'circular_wait';
-                loadWfgScenario(scen);
+                loadWfgScenario(scen, true);
+            });
+        }
+
+        if (scenarioSelect) {
+            scenarioSelect.addEventListener('change', () => {
+                loadWfgScenario(scenarioSelect.value, true);
             });
         }
 
         if (btnDetect) {
-            btnDetect.addEventListener('click', fetchWfg);
+            btnDetect.addEventListener('click', () => fetchWfg(true));
+        }
+
+        if (btnToggleMode) {
+            btnToggleMode.addEventListener('click', toggleViewMode);
         }
 
         // Banker's Controls
@@ -51,18 +71,38 @@ const DeadlockGraph = (() => {
         const btnCheck = document.getElementById('btnRunBankerCheck');
 
         if (btnSafeDemo) {
-            btnSafeDemo.addEventListener('click', () => loadBankerScenario('safe'));
+            btnSafeDemo.addEventListener('click', () => loadBankerScenario('safe', true));
         }
         if (btnUnsafeDemo) {
-            btnUnsafeDemo.addEventListener('click', () => loadBankerScenario('unsafe'));
+            btnUnsafeDemo.addEventListener('click', () => loadBankerScenario('unsafe', true));
         }
         if (btnCheck) {
             btnCheck.addEventListener('click', runBankerSafetyCheck);
         }
 
-        // Load default circular wait scenario initially
-        loadWfgScenario('circular_wait');
-        loadBankerScenario('safe');
+        // Initial background fetch (silent, no popup toasts on initial page load)
+        loadWfgScenario('circular_wait', false);
+        loadBankerScenario('safe', false);
+    }
+
+    function toggleViewMode() {
+        currentViewMode = currentViewMode === 'rag' ? 'wfg' : 'rag';
+        const btn = document.getElementById('btnToggleGraphView');
+        if (btn) {
+            btn.textContent = currentViewMode === 'rag' ? 'Mode: RAG (P + R)' : 'Mode: WFG (P only)';
+            btn.title = currentViewMode === 'rag'
+                ? 'Showing Resource Allocation Graph (Processes + Resources)'
+                : 'Showing Wait-For Graph (Direct Process Dependencies)';
+        }
+        resizeCanvas();
+        layoutGraphNodes();
+        drawGraph();
+        App.showToast(
+            currentViewMode === 'rag'
+                ? 'Switched to Resource Allocation Graph view'
+                : 'Switched to Wait-For Graph (direct wait) view',
+            'info'
+        );
     }
 
     function isTabVisible() {
@@ -71,11 +111,29 @@ const DeadlockGraph = (() => {
     }
 
     function onTabActivated() {
+        // Immediate render with fallback dimensions
         resizeCanvas();
         layoutGraphNodes();
         drawGraph();
-        if (currentResult && currentResult.has_deadlock) {
-            startAnimationLoop();
+
+        // Secondary pass via requestAnimationFrame once browser reflows panel geometry
+        requestAnimationFrame(() => {
+            resizeCanvas();
+            layoutGraphNodes();
+            drawGraph();
+            if (currentResult && currentResult.has_deadlock) {
+                startAnimationLoop();
+            }
+        });
+
+        // If graph is empty (e.g. startup fetch failed or server wasn't ready), fetch now!
+        if (!currentGraph || !currentGraph.nodes || currentGraph.nodes.length === 0) {
+            loadWfgScenario(currentScenarioId || 'circular_wait', false);
+        }
+
+        // If banker's state is empty, load it
+        if (!bankerState) {
+            loadBankerScenario('safe', false);
         }
     }
 
@@ -85,9 +143,39 @@ const DeadlockGraph = (() => {
 
     function resizeCanvas() {
         if (!canvas) return;
-        const rect = canvas.parentElement.getBoundingClientRect();
-        canvas.width = rect.width;
-        canvas.height = 360;
+        const parent = canvas.parentElement;
+        let w = 0;
+        if (parent) {
+            const rect = parent.getBoundingClientRect();
+            w = Math.floor(rect.width || parent.clientWidth || parent.offsetWidth || 0);
+        }
+
+        // Robust fallback: compute from deadlock panel, main content, or window
+        if (!w || w < 200) {
+            const panel = document.getElementById('panelDeadlock');
+            const main = document.querySelector('.main-content') || document.body;
+            w = Math.floor(panel?.clientWidth || (main ? (main.clientWidth - 80) : 0) || 720);
+        }
+
+        const dpr = window.devicePixelRatio || 1;
+        const cssWidth = Math.max(340, w);
+        const cssHeight = 360;
+
+        canvas.style.width = `${cssWidth}px`;
+        canvas.style.height = `${cssHeight}px`;
+        canvas.width = Math.floor(cssWidth * dpr);
+        canvas.height = Math.floor(cssHeight * dpr);
+
+        if (ctx) {
+            ctx.resetTransform?.();
+            ctx.scale(dpr, dpr);
+        }
+    }
+
+    function getCssDimensions() {
+        const cssWidth = canvas && canvas.style.width ? parseFloat(canvas.style.width) : (canvas ? canvas.width : 600);
+        const cssHeight = canvas && canvas.style.height ? parseFloat(canvas.style.height) : (canvas ? canvas.height : 360);
+        return { w: cssWidth, h: cssHeight };
     }
 
     function startAnimationLoop() {
@@ -100,7 +188,7 @@ const DeadlockGraph = (() => {
                 animFrameId = null;
                 return;
             }
-            pulsePhase = (pulsePhase + 0.05) % (Math.PI * 2);
+            pulsePhase = (pulsePhase + 0.04) % (Math.PI * 2);
             drawGraph();
             animFrameId = requestAnimationFrame(loop);
         }
@@ -114,68 +202,178 @@ const DeadlockGraph = (() => {
         }
     }
 
-    async function loadWfgScenario(scenarioId) {
+    function setLoadingState(loading, message = 'Evaluating Wait-For Graph...') {
+        isFetching = loading;
+        const title = document.getElementById('wfgStatusTitle');
+        const btnLoad = document.getElementById('btnLoadWfgScenario');
+        const btnDetect = document.getElementById('btnDetectDeadlock');
+
+        if (btnLoad) btnLoad.disabled = loading;
+        if (btnDetect) btnDetect.disabled = loading;
+
+        if (loading && title) {
+            title.innerHTML = `⏳ <span style="color: var(--text-secondary);">${message}</span>`;
+        }
+    }
+
+    async function loadWfgScenario(scenarioId, isManual = false) {
+        currentScenarioId = scenarioId;
+
+        // Fast-path: Instant display from client cache (0ms latency)
+        if (scenarioCache[scenarioId]) {
+            applyGraphData(scenarioCache[scenarioId]);
+            if (isManual) {
+                App.showToast(`Loaded scenario: ${scenarioId}`, 'info');
+            }
+        }
+
+        setLoadingState(true, `Loading ${scenarioId} scenario...`);
+
         try {
             const res = await fetch(`/api/deadlock/wfg/load/${scenarioId}`, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
-                currentGraph = data.graph;
-                currentResult = data.result;
-                layoutGraphNodes();
-                drawGraph();
-                renderWfgResults(currentResult);
-                App.showToast(`Loaded WFG scenario: ${scenarioId}`, 'info');
+                scenarioCache[scenarioId] = data;
+                applyGraphData(data);
+                if (isManual && !scenarioCache[scenarioId + '_notified']) {
+                    App.showToast(`Loaded scenario: ${scenarioId}`, 'info');
+                }
+            } else {
+                console.error(`Failed to load scenario ${scenarioId}: HTTP ${res.status}`);
             }
         } catch (e) {
             console.error('Failed to load WFG scenario:', e);
+            if (!scenarioCache[scenarioId]) {
+                const title = document.getElementById('wfgStatusTitle');
+                if (title) title.innerHTML = `⚠️ <span style="color: var(--accent-rose);">Failed to load scenario: ${e.message}</span>`;
+            }
+        } finally {
+            setLoadingState(false);
         }
     }
 
-    async function fetchWfg() {
+    async function fetchWfg(isManual = false) {
+        setLoadingState(true, 'Running Tarjan\'s DFS cycle detection...');
         try {
             const res = await fetch('/api/deadlock/wfg');
             if (res.ok) {
                 const data = await res.json();
-                currentGraph = data.graph;
-                currentResult = data.result;
-                layoutGraphNodes();
-                drawGraph();
-                renderWfgResults(currentResult);
-                App.showToast(currentResult.has_deadlock ? '⚠️ Deadlock cycle detected!' : '✅ No deadlock detected', currentResult.has_deadlock ? 'error' : 'success');
+                // If backend returned empty graph, fall back to default scenario
+                if (!data.graph || !data.graph.nodes || data.graph.nodes.length === 0) {
+                    await loadWfgScenario('circular_wait', isManual);
+                    return;
+                }
+                applyGraphData(data);
+                if (isManual) {
+                    App.showToast(
+                        data.result.has_deadlock ? '⚠️ Deadlock cycle detected!' : '✅ No deadlock detected',
+                        data.result.has_deadlock ? 'error' : 'success'
+                    );
+                }
             }
         } catch (e) {
             console.error('Failed to fetch WFG:', e);
+            if (isManual) {
+                App.showToast('Failed to evaluate deadlock: ' + e.message, 'error');
+            }
+        } finally {
+            setLoadingState(false);
         }
+    }
+
+    function applyGraphData(data) {
+        currentGraph = data.graph || { nodes: [], edges: [] };
+        currentResult = data.result || null;
+
+        resizeCanvas();
+        layoutGraphNodes();
+        drawGraph();
+        renderWfgResults(currentResult);
+
+        if (currentResult && currentResult.has_deadlock) {
+            startAnimationLoop();
+        } else {
+            stopAnimationLoop();
+        }
+    }
+
+    function getActiveNodes() {
+        if (!currentGraph || !currentGraph.nodes) return [];
+        if (currentViewMode === 'wfg') {
+            return currentGraph.nodes.filter(n => n.type === 'process');
+        }
+        return currentGraph.nodes;
+    }
+
+    function getActiveEdges() {
+        if (!currentGraph) return [];
+        if (currentViewMode === 'wfg') {
+            return currentGraph.wfg_edges || currentGraph.edges || [];
+        }
+        return currentGraph.rag_edges || currentGraph.edges || [];
     }
 
     function layoutGraphNodes() {
         if (!canvas || !currentGraph || !currentGraph.nodes) return;
 
-        const w = canvas.width;
-        const h = canvas.height;
+        const { w, h } = getCssDimensions();
         const centerX = w / 2;
         const centerY = h / 2;
         const radius = Math.min(centerX, centerY) * 0.72;
 
-        const nodes = currentGraph.nodes;
+        const nodes = getActiveNodes();
         const count = nodes.length;
+        if (count === 0) return;
 
-        for (let i = 0; i < count; i++) {
-            const angle = (i / count) * (Math.PI * 2) - Math.PI / 2;
-            nodes[i].x = centerX + Math.cos(angle) * radius;
-            nodes[i].y = centerY + Math.sin(angle) * radius;
+        // Separate processes and resources
+        const procs = nodes.filter(n => n.type === 'process');
+        const res = nodes.filter(n => n.type === 'resource');
+
+        if (currentViewMode === 'rag' && procs.length > 0 && res.length > 0 && procs.length === res.length) {
+            // Interleave processes and resources along the circle for a natural dependency ring
+            const ordered = [];
+            for (let i = 0; i < procs.length; i++) {
+                ordered.push(procs[i]);
+                ordered.push(res[i]);
+            }
+            const total = ordered.length;
+            for (let i = 0; i < total; i++) {
+                const angle = (i / total) * (Math.PI * 2) - Math.PI / 2;
+                ordered[i].x = centerX + Math.cos(angle) * radius;
+                ordered[i].y = centerY + Math.sin(angle) * radius;
+            }
+        } else {
+            // Equiangular circular distribution
+            for (let i = 0; i < count; i++) {
+                const angle = (i / count) * (Math.PI * 2) - Math.PI / 2;
+                nodes[i].x = centerX + Math.cos(angle) * radius;
+                nodes[i].y = centerY + Math.sin(angle) * radius;
+            }
         }
     }
 
     function drawGraph() {
-        if (!canvas || !ctx || !currentGraph) return;
+        if (!canvas || !ctx) return;
 
-        const w = canvas.width;
-        const h = canvas.height;
+        const { w, h } = getCssDimensions();
         ctx.clearRect(0, 0, w, h);
 
+        const nodes = getActiveNodes();
+        const edges = getActiveEdges();
+
+        if (nodes.length === 0) {
+            ctx.save();
+            ctx.fillStyle = '#64748b';
+            ctx.font = '13px "Inter", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('No graph nodes loaded. Select a scenario above.', w / 2, h / 2);
+            ctx.restore();
+            return;
+        }
+
         const nodeMap = new Map();
-        for (const n of (currentGraph.nodes || [])) {
+        for (const n of nodes) {
             nodeMap.set(n.id, n);
         }
 
@@ -184,7 +382,7 @@ const DeadlockGraph = (() => {
         const victimId = currentResult?.recommended_victim;
 
         // 1. Draw Edges
-        for (const edge of (currentGraph.edges || [])) {
+        for (const edge of edges) {
             const fromNode = nodeMap.get(edge.from);
             const toNode = nodeMap.get(edge.to);
             if (!fromNode || !toNode) continue;
@@ -196,12 +394,13 @@ const DeadlockGraph = (() => {
                 fromNode.x, fromNode.y,
                 toNode.x, toNode.y,
                 edge.type === 'request' ? 'dashed' : 'solid',
-                isDeadlockedEdge
+                isDeadlockedEdge,
+                edge.label || (edge.type === 'request' ? 'requests' : (edge.type === 'wait' ? edge.resource : 'holds'))
             );
         }
 
         // 2. Draw Nodes
-        for (const node of (currentGraph.nodes || [])) {
+        for (const node of nodes) {
             const isProc = node.type === 'process';
             const isDeadlocked = isProc ? involvedProcs.has(node.id) : involvedRes.has(node.id);
             const isVictim = node.id === victimId;
@@ -217,14 +416,14 @@ const DeadlockGraph = (() => {
         ctx.save();
 
         if (isVictim) {
-            // Glowing amber halo for victim
+            // Glowing amber halo for optimal victim
             const pulse = Math.sin(pulsePhase) * 6 + 12;
             ctx.shadowColor = '#f59e0b';
             ctx.shadowBlur = pulse;
             ctx.strokeStyle = '#f59e0b';
             ctx.lineWidth = 3;
         } else if (isDeadlocked) {
-            // Glowing red halo for deadlock
+            // Glowing crimson halo for deadlock cycle
             const pulse = Math.sin(pulsePhase) * 6 + 10;
             ctx.shadowColor = '#f43f5e';
             ctx.shadowBlur = pulse;
@@ -241,7 +440,7 @@ const DeadlockGraph = (() => {
             const r = 24;
             ctx.beginPath();
             ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fillStyle = isVictim ? 'rgba(245, 158, 11, 0.25)' : (isDeadlocked ? 'rgba(244, 63, 94, 0.25)' : 'rgba(99, 102, 241, 0.2)');
+            ctx.fillStyle = isVictim ? 'rgba(245, 158, 11, 0.28)' : (isDeadlocked ? 'rgba(244, 63, 94, 0.28)' : 'rgba(99, 102, 241, 0.2)');
             ctx.fill();
             ctx.stroke();
 
@@ -251,23 +450,27 @@ const DeadlockGraph = (() => {
             ctx.font = 'bold 11px "JetBrains Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(node.label || node.id, x, y - 2);
+            ctx.fillText(node.label || node.name || node.id, x, y - 2);
 
             if (isVictim) {
                 ctx.fillStyle = '#f59e0b';
                 ctx.font = 'bold 8px "Inter", sans-serif';
                 ctx.fillText('VICTIM', x, y + 10);
+            } else if (node.priority !== undefined) {
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '8px "Inter", sans-serif';
+                ctx.fillText(`pri: ${node.priority}`, x, y + 10);
             }
         } else {
             // Resource Node: Rounded Rectangle
-            const rw = 48;
+            const rw = 52;
             const rh = 36;
             const rx = x - rw / 2;
             const ry = y - rh / 2;
 
             ctx.beginPath();
             ctx.roundRect(rx, ry, rw, rh, 6);
-            ctx.fillStyle = isDeadlocked ? 'rgba(244, 63, 94, 0.25)' : 'rgba(6, 182, 212, 0.2)';
+            ctx.fillStyle = isDeadlocked ? 'rgba(244, 63, 94, 0.28)' : 'rgba(6, 182, 212, 0.2)';
             ctx.fill();
             ctx.stroke();
 
@@ -277,26 +480,29 @@ const DeadlockGraph = (() => {
             ctx.font = 'bold 10px "JetBrains Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(node.label || node.id, x, y - 4);
+            ctx.fillText(node.label || node.name || node.id, x, y - 4);
 
             // Instances count
             ctx.fillStyle = '#94a3b8';
             ctx.font = '9px "JetBrains Mono", monospace';
             const total = node.total !== undefined ? node.total : (node.instances || 1);
-            const inst = node.available !== undefined ? `${node.available}/${total}` : `${total} inst`;
+            const inst = node.available !== undefined ? `${node.available}/${total} inst` : `${total} inst`;
             ctx.fillText(inst, x, y + 9);
         }
 
         ctx.restore();
     }
 
-    function drawArrow(fromX, fromY, toX, toY, style, isDeadlocked) {
+    function drawArrow(fromX, fromY, toX, toY, style, isDeadlocked, label) {
         ctx.save();
 
         const dx = toX - fromX;
         const dy = toY - fromY;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist === 0) return;
+        if (dist === 0) {
+            ctx.restore();
+            return;
+        }
 
         const nodeRadius = 26;
         const startX = fromX + (dx / dist) * nodeRadius;
@@ -304,11 +510,11 @@ const DeadlockGraph = (() => {
         const endX = toX - (dx / dist) * nodeRadius;
         const endY = toY - (dy / dist) * nodeRadius;
 
-        ctx.strokeStyle = isDeadlocked ? '#f43f5e' : (style === 'dashed' ? 'rgba(245, 158, 11, 0.7)' : 'rgba(99, 102, 241, 0.7)');
+        ctx.strokeStyle = isDeadlocked ? '#f43f5e' : (style === 'dashed' ? 'rgba(245, 158, 11, 0.75)' : 'rgba(99, 102, 241, 0.75)');
         ctx.lineWidth = isDeadlocked ? 2.5 : 1.8;
 
         if (style === 'dashed') {
-            ctx.setLineDash([4, 4]);
+            ctx.setLineDash([5, 4]);
         } else {
             ctx.setLineDash([]);
         }
@@ -320,7 +526,7 @@ const DeadlockGraph = (() => {
 
         // Arrowhead
         const angle = Math.atan2(endY - startY, endX - startX);
-        const headLen = 9;
+        const headLen = 10;
 
         ctx.setLineDash([]);
         ctx.fillStyle = ctx.strokeStyle;
@@ -331,6 +537,17 @@ const DeadlockGraph = (() => {
         ctx.closePath();
         ctx.fill();
 
+        // Optional edge label
+        if (label && dist > 70) {
+            const midX = (startX + endX) / 2;
+            const midY = (startY + endY) / 2;
+            ctx.fillStyle = isDeadlocked ? '#fca5a5' : '#94a3b8';
+            ctx.font = '8px "JetBrains Mono", monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, midX, midY - 6);
+        }
+
         ctx.restore();
     }
 
@@ -339,17 +556,21 @@ const DeadlockGraph = (() => {
         const detail = document.getElementById('wfgStatusDetail');
         const box = document.getElementById('wfgResultBox');
 
-        if (!res) return;
+        if (!res || !box) return;
 
         if (res.has_deadlock) {
             box.style.borderColor = 'rgba(244, 63, 94, 0.5)';
             box.style.background = 'rgba(244, 63, 94, 0.08)';
-            title.innerHTML = `⚠️ <span style="color: var(--accent-rose);">DEADLOCK DETECTED (${res.cycles?.length || 1} Circular Wait Cycles)</span>`;
+            const cycleCount = res.cycles?.length || 1;
+            const cyclePath = res.cycles && res.cycles[0] ? res.cycles[0].join(' &rarr; ') : '';
+            
+            title.innerHTML = `⚠️ <span style="color: var(--accent-rose);">DEADLOCK DETECTED (${cycleCount} Circular Wait Cycle${cycleCount > 1 ? 's' : ''})</span>`;
             detail.innerHTML = `
-                <div><strong>Involved Processes:</strong> ${res.involved_processes?.join(', ')}</div>
-                <div><strong>Involved Resources:</strong> ${res.involved_resources?.join(', ')}</div>
+                ${cyclePath ? `<div style="margin-bottom: 4px; font-family: var(--font-mono); font-size: 0.78rem; color: #fecdd3;"><strong>Cycle:</strong> ${cyclePath}</div>` : ''}
+                <div><strong>Involved Processes:</strong> ${res.involved_processes?.join(', ') || 'None'}</div>
+                <div><strong>Contended Resources:</strong> ${res.involved_resources?.join(', ') || 'None'}</div>
                 <div style="margin-top: 6px; color: var(--accent-amber);">
-                    🎯 <strong>Optimal Preemption Victim:</strong> ${res.recommended_victim} 
+                    🎯 <strong>Optimal Preemption Victim:</strong> ${res.recommended_victim || 'None'} 
                     <br><span style="font-size: 0.72rem; color: var(--text-tertiary);">${res.victim_reason || ''}</span>
                 </div>
             `;
@@ -361,16 +582,27 @@ const DeadlockGraph = (() => {
         }
     }
 
-    // ── Banker's Algorithm ──────────────────────────────────────────────────
+    // ── Banker's Algorithm Visualizer ────────────────────────────────────────
 
-    async function loadBankerScenario(scenarioId) {
+    async function loadBankerScenario(scenarioId, isManual = false) {
+        if (bankerCache[scenarioId]) {
+            bankerState = bankerCache[scenarioId].scenario;
+            renderBankerTable(bankerCache[scenarioId].scenario, bankerCache[scenarioId].result);
+            if (isManual) {
+                App.showToast(`Loaded Banker's ${scenarioId.toUpperCase()} scenario`, 'info');
+            }
+        }
+
         try {
             const res = await fetch(`/api/deadlock/banker/scenarios/${scenarioId}`);
             if (res.ok) {
                 const data = await res.json();
+                bankerCache[scenarioId] = data;
                 bankerState = data.scenario;
                 renderBankerTable(data.scenario, data.result);
-                App.showToast(`Loaded Banker's ${scenarioId.toUpperCase()} scenario`, 'info');
+                if (isManual && !bankerCache[scenarioId + '_notified']) {
+                    App.showToast(`Loaded Banker's ${scenarioId.toUpperCase()} scenario`, 'info');
+                }
             }
         } catch (e) {
             console.error('Failed to load Banker scenario:', e);
@@ -400,6 +632,7 @@ const DeadlockGraph = (() => {
             }
         } catch (e) {
             console.error('Failed to check Banker safety:', e);
+            App.showToast('Failed to run Banker safety check: ' + e.message, 'error');
         }
     }
 
@@ -462,6 +695,7 @@ const DeadlockGraph = (() => {
         init,
         loadWfgScenario,
         fetchWfg,
+        toggleViewMode,
         loadBankerScenario,
         runBankerSafetyCheck,
         onTabActivated,

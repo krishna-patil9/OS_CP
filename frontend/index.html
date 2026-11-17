@@ -300,11 +300,14 @@
                             <div class="card-title"><span class="icon">🕸️</span> Wait-For Graph (WFG) Cycle Detection</div>
                             <div class="btn-group">
                                 <select id="wfgScenarioSelect" class="form-select" style="font-size: 0.75rem; padding: 2px 6px;">
-                                    <option value="circular_wait">Scenario: Circular Wait Deadlock</option>
-                                    <option value="no_deadlock">Scenario: Safe Resource Flow</option>
+                                    <option value="circular_wait">Scenario: Circular Wait Deadlock (3 Procs, 3 Res)</option>
+                                    <option value="dining_philosophers">Scenario: Dining Philosophers (5 Phil, 5 Forks)</option>
+                                    <option value="multi_resource">Scenario: Multi-Resource Deadlock (4 Procs)</option>
+                                    <option value="no_deadlock">Scenario: Safe Resource Flow (No Deadlock)</option>
                                 </select>
                                 <button class="btn btn-sm btn-primary" id="btnLoadWfgScenario">Load</button>
                                 <button class="btn btn-sm" id="btnDetectDeadlock">🔍 Detect</button>
+                                <button class="btn btn-sm btn-outline" id="btnToggleGraphView" title="Toggle between RAG (Processes + Resources) and WFG (Processes only)">Mode: RAG (P + R)</button>
                             </div>
                         </div>
                         <p style="font-size: 0.75rem; color: var(--text-tertiary); margin-bottom: var(--space-sm);">

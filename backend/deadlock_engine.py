@@ -276,6 +276,8 @@ class WaitForGraph:
                 "label": proc.name,
                 "type": "process",
                 "priority": proc.priority,
+                "runtime_seconds": proc.runtime_seconds,
+                "memory_mb": proc.memory_mb,
                 "allocated": proc.allocated,
                 "requesting": proc.requesting,
             })
@@ -291,15 +293,50 @@ class WaitForGraph:
                 "available": res.available_instances,
             })
 
-        edges = []
+        # 1. Resource Allocation Graph (RAG) edges connecting Processes and Resources
+        rag_edges = []
+        for pid, proc in self.processes.items():
+            # Allocation edges: Resource -> Process (held by process)
+            for rid, count in proc.allocated.items():
+                if count > 0 and rid in self.resources:
+                    rag_edges.append({
+                        "from": rid,
+                        "to": pid,
+                        "type": "allocation",
+                        "resource": rid,
+                        "label": f"holds ({count})" if count > 1 else "holds",
+                        "weight": count,
+                    })
+            # Request edges: Process -> Resource (requested by process)
+            for rid, count in proc.requesting.items():
+                if count > 0 and rid in self.resources:
+                    rag_edges.append({
+                        "from": pid,
+                        "to": rid,
+                        "type": "request",
+                        "resource": rid,
+                        "label": f"requests ({count})" if count > 1 else "requests",
+                        "weight": count,
+                    })
+
+        # 2. Pure Wait-For Graph (WFG) edges: Process -> Process
+        wfg_edges = []
         for e in self.edges:
-            edges.append({
+            wfg_edges.append({
                 "from": e.from_process,
                 "to": e.to_process,
+                "type": "wait",
                 "resource": e.resource,
+                "label": f"waits for {e.resource}",
             })
 
-        return {"nodes": nodes, "edges": edges}
+        # By default, provide RAG edges in 'edges' so that both Process and Resource nodes are connected
+        return {
+            "nodes": nodes,
+            "edges": rag_edges,
+            "rag_edges": rag_edges,
+            "wfg_edges": wfg_edges,
+        }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -487,6 +524,64 @@ class DeadlockScenarioBuilder:
         wfg.add_process(ProcessNode(
             "P2", "Worker B", priority=2,
             allocated={"R2": 0}, requesting={"R2": 1},
+        ))
+
+        return wfg
+
+    @staticmethod
+    def dining_philosophers_scenario() -> WaitForGraph:
+        """
+        Classic Dijkstra Dining Philosophers problem (5 philosophers, 5 chopsticks).
+        Every philosopher holds left chopstick and waits for right chopstick -> cyclic deadlock.
+        """
+        wfg = WaitForGraph()
+        n = 5
+        for i in range(n):
+            wfg.add_resource(Resource(f"C{i}", f"Chopstick {i}", 1, 0))
+
+        for i in range(n):
+            left_chop = f"C{i}"
+            right_chop = f"C{(i + 1) % n}"
+            wfg.add_process(ProcessNode(
+                f"Phil_{i}", f"Philosopher {i}",
+                priority=2 if i % 2 == 0 else 1,
+                runtime_seconds=float(i * 3 + 2),
+                memory_mb=40.0 + i * 10,
+                allocated={left_chop: 1},
+                requesting={right_chop: 1},
+            ))
+
+        return wfg
+
+    @staticmethod
+    def multi_resource_scenario() -> WaitForGraph:
+        """
+        Multi-resource contention scenario:
+        P1, P2, P3 form a circular deadlock over Mutex A, Mutex B, and Shared DB.
+        P4 is blocked on Mutex B (waiting on P2), demonstrating dependency chains.
+        """
+        wfg = WaitForGraph()
+
+        wfg.add_resource(Resource("MA", "Mutex A", 1, 0))
+        wfg.add_resource(Resource("MB", "Mutex B", 1, 0))
+        wfg.add_resource(Resource("DB", "Shared DB", 1, 0))
+        wfg.add_resource(Resource("GPU", "GPU Lock", 1, 0))
+
+        wfg.add_process(ProcessNode(
+            "P1", "Service A", priority=2, runtime_seconds=8.0, memory_mb=120,
+            allocated={"MA": 1}, requesting={"MB": 1},
+        ))
+        wfg.add_process(ProcessNode(
+            "P2", "Service B", priority=1, runtime_seconds=15.0, memory_mb=250,
+            allocated={"MB": 1}, requesting={"DB": 1},
+        ))
+        wfg.add_process(ProcessNode(
+            "P3", "Service C", priority=3, runtime_seconds=4.0, memory_mb=80,
+            allocated={"DB": 1}, requesting={"MA": 1},
+        ))
+        wfg.add_process(ProcessNode(
+            "P4", "Analytics", priority=1, runtime_seconds=2.0, memory_mb=60,
+            allocated={"GPU": 1}, requesting={"MB": 1},
         ))
 
         return wfg

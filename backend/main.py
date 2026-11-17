@@ -60,8 +60,8 @@ policy = PolicyEngine(monitor, isolation)
 bankers = BankersAlgorithm()
 page_sim = PageReplacementSimulator()
 
-# Deadlock WFG (stateful for interactive graph editing)
-wfg = WaitForGraph()
+# Deadlock WFG (pre-initialized with circular_wait scenario so endpoints are never empty)
+wfg = DeadlockScenarioBuilder.circular_wait_scenario()
 
 # Execution Mode: "normal" (default) or "testing"
 current_execution_mode = "normal"
@@ -512,8 +512,10 @@ async def get_deadlock_scenarios():
     """Get available pre-built deadlock scenarios."""
     return {
         "scenarios": [
-            {"id": "circular_wait", "name": "Circular Wait (Deadlock)", "description": "3 processes in circular wait"},
-            {"id": "no_deadlock", "name": "No Deadlock", "description": "Requests can be satisfied"},
+            {"id": "circular_wait", "name": "Circular Wait (Deadlock)", "description": "3 processes & 3 resources in circular wait"},
+            {"id": "dining_philosophers", "name": "Dining Philosophers", "description": "5 philosophers competing for 5 chopsticks"},
+            {"id": "multi_resource", "name": "Multi-Resource Contention", "description": "4 processes with cross-resource dependencies"},
+            {"id": "no_deadlock", "name": "Safe Resource Flow", "description": "Requests can be satisfied immediately"},
             {"id": "banker_safe", "name": "Banker's Safe State", "description": "5 processes, safe sequence exists"},
             {"id": "banker_unsafe", "name": "Banker's Unsafe State", "description": "3 processes, no safe sequence"},
         ]
@@ -525,6 +527,10 @@ async def load_wfg_scenario(scenario_id: str):
     global wfg
     if scenario_id == "circular_wait":
         wfg = DeadlockScenarioBuilder.circular_wait_scenario()
+    elif scenario_id == "dining_philosophers":
+        wfg = DeadlockScenarioBuilder.dining_philosophers_scenario()
+    elif scenario_id == "multi_resource":
+        wfg = DeadlockScenarioBuilder.multi_resource_scenario()
     elif scenario_id == "no_deadlock":
         wfg = DeadlockScenarioBuilder.no_deadlock_scenario()
     else:
