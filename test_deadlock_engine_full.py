@@ -23,16 +23,15 @@ def run_tests():
         for s in scenarios:
             print(f"       - {s['id']}: {s['name']}")
 
-        # Test 2: Initial GET /api/deadlock/wfg (should NOT be empty!)
+        # Test 2: Initial GET /api/deadlock/wfg (must start EMPTY — no dummy circular_wait graph!)
         t0 = time.perf_counter()
         res = client.get("/api/deadlock/wfg")
         elapsed = (time.perf_counter() - t0) * 1000
         assert res.status_code == 200
         data = res.json()
-        assert len(data["graph"]["nodes"]) > 0, "Initial graph should not be empty!"
-        assert data["result"]["has_deadlock"] is True
-        print(f"[PASS] GET /api/deadlock/wfg ({elapsed:.1f}ms): Initial graph pre-loaded with {len(data['graph']['nodes'])} nodes, {len(data['graph']['edges'])} edges")
-        print(f"       Victim: {data['result']['recommended_victim']} -> {data['result']['victim_reason']}")
+        assert len(data["graph"]["nodes"]) == 0, f"Initial graph must be empty (no dummy nodes), got {len(data['graph']['nodes'])}"
+        assert data["result"]["has_deadlock"] is False
+        print(f"[PASS] GET /api/deadlock/wfg ({elapsed:.1f}ms): Initial graph cleanly empty (0 nodes, no dummy circular_wait)")
 
         # Test 3: Load Circular Wait scenario
         t0 = time.perf_counter()

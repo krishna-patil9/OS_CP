@@ -267,8 +267,12 @@
                                 <input type="number" id="sbCpuCapInput" class="form-input" min="1" max="100" value="20" placeholder="e.g. 20 (max 20% CPU)">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" for="sbMemoryCapInput">Hard Memory Limit (MB)</label>
-                                <input type="number" id="sbMemoryCapInput" class="form-input" min="10" max="8192" value="100" placeholder="e.g. 100 MB hard limit">
+                                <label class="form-label" for="sbMemoryCapInput">Per-Process Committed Memory Limit (MB)</label>
+                                <input type="number" id="sbMemoryCapInput" class="form-input" min="10" max="8192" value="256" placeholder="e.g. 256 MB per process">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="sbJobMemoryCapInput">Aggregate Job Committed Memory Limit (MB)</label>
+                                <input type="number" id="sbJobMemoryCapInput" class="form-input" min="10" max="16384" value="512" placeholder="e.g. 512 MB total job">
                             </div>
                             <div class="form-group">
                                 <label class="form-label" for="sbMaxProcsInput">Max Active Processes (Fork-bomb guard)</label>
@@ -343,34 +347,151 @@
             <!-- TAB 3: DEADLOCK & CONCURRENCY ENGINE                           -->
             <!-- ═══════════════════════════════════════════════════════════════ -->
             <section id="panelDeadlock" class="tab-panel" role="tabpanel">
+                <!-- Real-Time Windows-Native Live Deadlock Monitor & Selective Recovery -->
+                <div class="card" id="liveDeadlockCard" style="margin-bottom: var(--space-lg);">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <span class="icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><polyline points="9 12 11 14 15 10"></polyline></svg>
+                            </span>
+                            Real-Time Live OS Deadlock Monitor (Windows Job Object + Named Mutexes)
+                        </div>
+                        <div class="btn-group">
+                            <select id="liveRunSelect" class="form-select form-select-sm" style="min-width: 260px;">
+                                <option value="">-- Waiting for Live Workload --</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" id="btnReturnToLive" style="display: none;">Return to Live</button>
+                            <span class="card-badge" id="liveAutoSyncBadge" style="background: var(--status-success-bg); color: var(--status-success-text);">AUTO-SYNC LIVE</span>
+                        </div>
+                    </div>
+                    <p class="card-desc">
+                        Run <code>python workloads\circular_deadlock.py</code>, <code>python workloads\dining_philosophers.py</code>, or <code>python workloads\multi_resource_deadlock.py</code> in a separate terminal. Live RAG, WFG, and Banker's Algorithm update automatically from a single versioned snapshot.
+                    </p>
+
+                    <!-- Clean Empty State when no live workload is active -->
+                    <div id="liveRunEmptyState" style="padding: var(--space-lg); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px dashed var(--border-default); text-align: center;">
+                        <div style="font-weight: 700; font-size: 0.96rem; letter-spacing: 0.04em; color: var(--text-primary); margin-bottom: 6px;">
+                            NO ACTIVE DEADLOCK WORKLOAD
+                        </div>
+                        <div style="font-size: 0.84rem; color: var(--text-secondary); margin-bottom: 10px;">
+                            Run one of the three Python scenario files from a separate VS Code terminal.
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 10px; font-family: var(--font-mono); font-size: 0.78rem;">
+                            <code>python workloads\circular_deadlock.py</code>
+                            <code>python workloads\dining_philosophers.py</code>
+                            <code>python workloads\multi_resource_deadlock.py</code>
+                        </div>
+                        <div style="font-size: 0.78rem; color: var(--text-muted);">
+                            Waiting for live workload registration...
+                        </div>
+                    </div>
+
+                    <!-- Historical Inspection Banner (only visible when explicitly viewing a past run) -->
+                    <div id="liveHistoryBanner" style="display: none; margin-bottom: var(--space-sm); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default); font-size: 0.82rem; color: var(--text-secondary);">
+                    </div>
+
+                    <div id="liveRunActiveContent" style="display: none;">
+                        <!-- Status & Watchdog Summary Strip -->
+                        <div style="display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; justify-content: space-between; margin-bottom: var(--space-md); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default);">
+                            <div style="display: flex; flex-wrap: wrap; gap: var(--space-md); align-items: center; font-size: 0.82rem;">
+                                <span><strong>Scenario:</strong> <span id="liveRunScenarioName" style="font-weight: 700;">--</span></span>
+                                <span><strong>Status:</strong> <span id="liveRunStatusBadge" class="priority-badge normal">--</span></span>
+                                <span><strong>Sandbox:</strong> <code id="liveRunSandboxName">--</code></span>
+                                <span><strong>Supervisor:</strong> <code id="liveRunSupervisorInfo">--</code></span>
+                                <span><strong>Limits:</strong> <span id="liveRunLimitsInfo">--</span></span>
+                            </div>
+                            <div style="display: flex; gap: var(--space-md); align-items: center; font-family: var(--font-mono); font-size: 0.8rem;">
+                                <span id="liveSnapshotVersionBadge" style="color: var(--text-secondary);">Snapshot v0</span>
+                                <span style="font-weight: 700; color: var(--status-warning-text);">Watchdog: <span id="liveWatchdogCountdown">--s</span></span>
+                            </div>
+                        </div>
+
+                        <!-- Explicit User-Approved Selective Recovery Banner -->
+                        <div id="liveRecoveryBox" style="display: none; margin-bottom: var(--space-md); padding: var(--space-md); border-radius: var(--radius-sm); background: var(--status-danger-bg); border: 1px solid var(--status-danger);">
+                            <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-sm);">
+                                <div>
+                                    <div style="font-weight: 700; color: var(--status-danger-text); font-size: 0.9rem;" id="liveRecoveryTitle">
+                                        LIVE DEADLOCK DETECTED — Explicit User Approval Required
+                                    </div>
+                                    <div style="font-size: 0.82rem; color: var(--text-primary); margin-top: 4px;" id="liveRecoveryDetail">
+                                        --
+                                    </div>
+                                </div>
+                                <div class="btn-group">
+                                    <button class="btn btn-sm btn-danger" id="btnApproveLiveRecovery">
+                                        Approve &amp; Terminate Victim Worker
+                                    </button>
+                                    <button class="btn btn-sm btn-outline" id="btnAbortLiveRun" title="Whole-job TerminateJobObject emergency teardown">
+                                        Abort Sandbox
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Post-Recovery / Aborted / Watchdog Outcome Banner -->
+                        <div id="liveOutcomeBox" style="display: none; margin-bottom: var(--space-md); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); font-size: 0.84rem;">
+                        </div>
+
+                        <!-- Workers & Event Audit Grid -->
+                        <div class="grid-2" style="gap: var(--space-md);">
+                            <div class="data-table-wrapper">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Worker</th>
+                                            <th>PID / TID</th>
+                                            <th>Recovery Pri (vs OS)</th>
+                                            <th>Job Verified</th>
+                                            <th>Holds / Waits</th>
+                                            <th>State</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="liveWorkersTableBody"></tbody>
+                                </table>
+                            </div>
+                            <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-sm); background: var(--bg-surface-alt); max-height: 220px; overflow-y: auto;">
+                                <div style="font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px;">
+                                    Live Synchronization &amp; OS WAIT_ABANDONED Audit Log
+                                </div>
+                                <div id="liveEventLog" style="font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.45;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Authoritative Synchronized Live Graphs: RAG/WFG + Live Banker's Algorithm -->
                 <div class="grid-2" style="margin-bottom: var(--space-lg);">
-                    <!-- Wait-For Graph (WFG) Interactive Canvas -->
+                    <!-- Live Resource Allocation & Wait-For Graph -->
                     <div class="card">
                         <div class="card-header">
                             <div class="card-title">
                                 <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
                                 </span>
-                                Wait-For Graph (WFG) Cycle Detection
+                                Live RAG / Wait-For Graph (WFG)
                             </div>
                             <div class="btn-group">
-                                <select id="wfgScenarioSelect" class="form-select form-select-sm">
-                                    <option value="circular_wait">Circular Wait (3 Procs, 3 Res)</option>
-                                    <option value="dining_philosophers">Dining Philosophers (5 Phil, 5 Forks)</option>
-                                    <option value="multi_resource">Multi-Resource Deadlock (4 Procs)</option>
-                                    <option value="no_deadlock">Safe Resource Flow (No Deadlock)</option>
-                                </select>
-                                <button class="btn btn-sm btn-primary" id="btnLoadWfgScenario">Load</button>
-                                <button class="btn btn-sm" id="btnDetectDeadlock">Detect</button>
+                                <span class="card-badge" id="wfgSnapshotBadge">Snapshot --</span>
                                 <button class="btn btn-sm btn-outline" id="btnToggleGraphView" title="Toggle between RAG (Processes + Resources) and WFG (Processes only)">Mode: RAG (P + R)</button>
                             </div>
                         </div>
                         <p class="card-desc">
-                            Interactive Process–Resource dependency graph. Cycles indicate circular wait.
+                            Real-time dependency graph built strictly from live Windows Named Mutex ownership and wait events.
                         </p>
 
-                        <div class="graph-canvas-container">
+                        <div class="graph-canvas-container" style="position: relative;">
                             <canvas id="wfgCanvas" width="600" height="360"></canvas>
+                            <div id="wfgEmptyOverlay" style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; background: var(--bg-surface-alt); border-radius: var(--radius-sm);">
+                                <div style="font-weight: 700; font-size: 0.92rem; letter-spacing: 0.04em; color: var(--text-primary); margin-bottom: 6px;">
+                                    NO ACTIVE DEADLOCK WORKLOAD
+                                </div>
+                                <div style="font-size: 0.82rem; color: var(--text-secondary); max-width: 360px; margin-bottom: 6px;">
+                                    Run one of the three Python scenario files from a separate VS Code terminal.
+                                </div>
+                                <div style="font-size: 0.78rem; color: var(--text-muted);">
+                                    Waiting for live workload registration...
+                                </div>
+                            </div>
                             <div class="graph-legend">
                                 <div class="graph-legend-item">
                                     <span class="graph-legend-dot" style="background: var(--status-info);"></span> Process Node
@@ -387,68 +508,114 @@
                             </div>
                         </div>
 
-                        <!-- Detection Result Box -->
+                        <!-- Live Detection Result Box -->
                         <div id="wfgResultBox" style="margin-top: var(--space-md); padding: var(--space-md); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default);">
                             <div style="font-weight: 700; font-size: 0.88rem; margin-bottom: var(--space-xs);" id="wfgStatusTitle">
-                                Status: Ready for analysis
+                                Waiting for live workload registration...
                             </div>
                             <div style="font-size: 0.82rem; color: var(--text-secondary);" id="wfgStatusDetail">
-                                Select a scenario and click "Detect" to run Tarjan's Cycle Detection and evaluate victim preemption cost.
+                                No dummy graph is rendered. Start a live scenario file to stream real-time RAG/WFG cycle detection.
                             </div>
                         </div>
                     </div>
 
-                    <!-- Banker's Algorithm Safety & Avoidance Visualizer -->
+                    <!-- LIVE BANKER'S ALGORITHM -->
                     <div class="card">
                         <div class="card-header">
                             <div class="card-title">
                                 <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
                                 </span>
-                                Banker's Algorithm (Deadlock Avoidance)
+                                LIVE BANKER'S ALGORITHM
                             </div>
                             <div class="btn-group">
-                                <button class="btn btn-sm" id="btnBankerSafeDemo">Safe State Demo</button>
-                                <button class="btn btn-sm" id="btnBankerUnsafeDemo">Unsafe State Demo</button>
+                                <span class="card-badge" id="bankerSnapshotBadge">Snapshot --</span>
                             </div>
                         </div>
                         <p class="card-desc">
-                            Computes the Need matrix (Max &minus; Allocation) and checks for a safe execution sequence.
+                            Computed live from declared Maximum Claims and actual Windows Named Mutex Allocations (<code>Need = Max &minus; Allocation</code>).
                         </p>
 
-                        <!-- Matrices Display -->
+                        <div style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary); margin-bottom: var(--space-sm);">
+                            Resources: <strong id="bankerResourcesList" style="color: var(--text-primary);">--</strong>
+                        </div>
+
+                        <!-- Live Matrices Display -->
                         <div class="banker-matrix" style="margin-bottom: var(--space-md);" id="bankerMatrixContainer">
                             <table id="bankerTable">
-                                <thead>
+                                <thead id="bankerTableHead">
                                     <tr>
                                         <th>Process</th>
-                                        <th>Allocation (A B C)</th>
-                                        <th>Max Claim (A B C)</th>
-                                        <th>Need (A B C)</th>
+                                        <th>Allocation</th>
+                                        <th>Max Claim</th>
+                                        <th>Need</th>
+                                        <th>Finish</th>
                                     </tr>
                                 </thead>
                                 <tbody id="bankerTableBody">
                                     <tr>
-                                        <td colspan="4" style="text-align: center; color: var(--text-muted);">
-                                            Click Safe or Unsafe State Demo to load matrices.
+                                        <td colspan="5" style="text-align: center; color: var(--text-muted); padding: var(--space-md);">
+                                            NO ACTIVE DEADLOCK WORKLOAD — Waiting for live workload registration...
                                         </td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
 
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm); flex-wrap: wrap; gap: 8px;">
                             <div style="font-family: var(--font-mono); font-size: 0.8rem;">
-                                Available Vector: <strong id="bankerAvailableVec" style="color: var(--accent-primary-hover);">[ -- ]</strong>
+                                Available Vector: <strong id="bankerAvailableVec" style="color: var(--accent-primary-hover);">--</strong>
                             </div>
-                            <button class="btn btn-sm btn-primary" id="btnRunBankerCheck">Run Safety Check</button>
+                            <div style="font-family: var(--font-mono); font-size: 0.8rem;">
+                                Safe Sequence: <strong id="bankerSafeSeqInline">--</strong>
+                            </div>
                         </div>
 
                         <div id="bankerResultBox" class="banker-result" style="display: none;">
-                            <!-- Populated dynamically -->
                         </div>
                     </div>
                 </div>
+
+                <!-- Separate Educational Simulation / Practice Section (Collapsed by Default — Never Affects Live View) -->
+                <details class="card" id="practiceDeadlockSection" style="margin-bottom: var(--space-lg);">
+                    <summary style="cursor: pointer; font-weight: 700; font-size: 0.9rem; color: var(--text-primary); padding: 4px 0;">
+                        Educational Simulation &amp; Practice Scenarios (Offline — Isolated from Live Monitor)
+                    </summary>
+                    <p class="card-desc" style="margin-top: var(--space-sm);">
+                        Static textbook WFG and Banker's Algorithm examples for offline study. Loading these scenarios never modifies the live monitor above.
+                    </p>
+                    <div class="grid-2" style="gap: var(--space-md); margin-top: var(--space-sm);">
+                        <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-md); background: var(--bg-surface-alt);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-sm);">
+                                <strong style="font-size: 0.85rem;">Practice WFG Scenarios</strong>
+                                <div class="btn-group">
+                                    <select id="practiceWfgScenarioSelect" class="form-select form-select-sm">
+                                        <option value="circular_wait">Circular Wait (3 Procs, 3 Res)</option>
+                                        <option value="dining_philosophers">Dining Philosophers (5 Phil, 5 Forks)</option>
+                                        <option value="multi_resource">Multi-Resource Deadlock (4 Procs)</option>
+                                        <option value="no_deadlock">Safe Resource Flow (No Deadlock)</option>
+                                    </select>
+                                    <button class="btn btn-sm btn-primary" id="btnLoadPracticeWfg">Load Practice</button>
+                                </div>
+                            </div>
+                            <div id="practiceWfgOutput" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary);">
+                                Select a practice scenario and click "Load Practice" to inspect its textbook cycle &amp; victim calculation.
+                            </div>
+                        </div>
+                        <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-md); background: var(--bg-surface-alt);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-sm);">
+                                <strong style="font-size: 0.85rem;">Practice Banker's Scenarios</strong>
+                                <div class="btn-group">
+                                    <button class="btn btn-sm" id="btnPracticeBankerSafe">Safe Example</button>
+                                    <button class="btn btn-sm" id="btnPracticeBankerUnsafe">Unsafe Example</button>
+                                </div>
+                            </div>
+                            <div id="practiceBankerOutput" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary);">
+                                Click "Safe Example" or "Unsafe Example" to inspect textbook Banker's matrices offline.
+                            </div>
+                        </div>
+                    </div>
+                </details>
             </section>
 
             <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -713,10 +880,10 @@
                             <span class="card-badge">Concurrency Test</span>
                         </div>
                         <p class="card-desc">
-                            Spawns two worker threads acquiring shared mutexes in reversed order with a 15s watchdog timeout.
+                            Launches a supervisor + real child worker processes inside a dedicated Windows Job Object contending over Windows Named Mutexes (120s watchdog).
                         </p>
                         <button class="btn btn-primary" id="btnLaunchDeadlockDemo">
-                            Spawn Thread Deadlock (15s Watchdog)
+                            Launch Live Mutex Deadlock Demo (120s Watchdog)
                         </button>
                     </div>
 
@@ -727,9 +894,9 @@
                                 <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
                                 </span>
-                                Untrusted Sandboxed Application
+                                Sandboxed Application Workload
                             </div>
-                            <span class="card-badge">Restricted Token</span>
+                            <span class="card-badge">Job Object Sandbox</span>
                         </div>
                         <p class="card-desc">
                             Executes a bounded workload inside a Windows NT Job Object (15% CPU, 50 MB RAM, max 3 processes).

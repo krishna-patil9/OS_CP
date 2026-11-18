@@ -49,6 +49,7 @@ const Isolation = (() => {
         const nameInput = document.getElementById('sbNameInput');
         const cpuInput = document.getElementById('sbCpuCapInput');
         const memInput = document.getElementById('sbMemoryCapInput');
+        const jobMemInput = document.getElementById('sbJobMemoryCapInput');
         const procsInput = document.getElementById('sbMaxProcsInput');
         const prioSelect = document.getElementById('sbPrioritySelect');
 
@@ -58,10 +59,15 @@ const Isolation = (() => {
             return;
         }
 
+        const perProcMb = parseInt(memInput.value) || null;
+        const jobMemMb = jobMemInput ? (parseInt(jobMemInput.value) || null) : null;
+
         const payload = {
             name: name,
             cpu_rate_percent: parseInt(cpuInput.value) || null,
-            memory_limit_mb: parseInt(memInput.value) || null,
+            memory_limit_mb: perProcMb,
+            per_process_memory_limit_mb: perProcMb,
+            job_memory_limit_mb: jobMemMb,
             max_active_processes: parseInt(procsInput.value) || null,
             priority_class: prioSelect.value || null,
             kill_on_close: true
@@ -218,8 +224,8 @@ const Isolation = (() => {
                             <span class="sandbox-limit-value">${cfg.cpu_rate_percent ? cfg.cpu_rate_percent + '%' : 'Unlimited'}</span>
                         </div>
                         <div class="sandbox-limit">
-                            <span class="sandbox-limit-label">Hard RAM Limit</span>
-                            <span class="sandbox-limit-value">${cfg.memory_limit_mb ? cfg.memory_limit_mb + ' MB' : 'Unlimited'}</span>
+                            <span class="sandbox-limit-label">Committed RAM (Proc / Job)</span>
+                            <span class="sandbox-limit-value">${cfg.per_process_memory_limit_mb || cfg.memory_limit_mb ? (cfg.per_process_memory_limit_mb || cfg.memory_limit_mb) + ' MB' : 'Unlim'} / ${cfg.job_memory_limit_mb ? cfg.job_memory_limit_mb + ' MB' : 'Unlim'}</span>
                         </div>
                         <div class="sandbox-limit">
                             <span class="sandbox-limit-label">Max Procs (Fork Cap)</span>

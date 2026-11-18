@@ -1,109 +1,75 @@
 """
-Deadlock Demo — Controlled Mutex Lock Order Inversion
+Real-Time Windows-Native Deadlock Demo (Backward-Compatible Circular Deadlock Entrypoint)
 
-Demonstrates deadlock principles with guaranteed self-resolution:
-  - 2-3 worker threads acquiring mutexes in opposite order
-  - Bounded lock acquisition timeouts so threads never freeze indefinitely
-  - Overall watchdog timer ensures process exits safely after demonstration
+Preserves backward compatibility for:
+  python workloads\\deadlock_demo.py
+as well as CLI options (--server, --workers, --delay, --timeout, --cpu-cap,
+--job-mem-mb, --proc-mem-mb, --max-procs).
+
+Delegates to the shared Windows-native scenario runner so Job Object containment,
+startup gate synchronization, real Windows Named Mutexes, and WAIT_ABANDONED
+reconciliation are identical across all scenario files.
 """
 
-import sys
-import time
-import threading
-import os
-import signal
 import argparse
+import sys
+from pathlib import Path
 
-stop_event = threading.Event()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from sdk.deadlock_sdk import (  # noqa: F401
+    DeadlockMonitorClient,
+    InstrumentedMutex,
+    Win32NamedEvent,
+    get_current_process_identity,
+)
+from sdk.scenario_runner import ScenarioDefinition, WorkerSpec, run_deadlock_scenario
 
 
-def signal_handler(signum, frame):
-    stop_event.set()
+def build_scenario(num_workers: int = 2) -> ScenarioDefinition:
+    n = max(2, min(5, int(num_workers)))
+    lock_ids = ["Lock_A", "Lock_B"] if n == 2 else [f"Lock_{chr(65 + i)}" for i in range(n)]
+    resources = [{"id": lid, "name": lid, "total_instances": 1} for lid in lock_ids]
+    priorities = [1, 3, 2, 4, 5]
+
+    workers = []
+    for i in range(n):
+        letter = chr(65 + i)
+        first_lid = lock_ids[i]
+        second_lid = lock_ids[(i + 1) % n]
+        workers.append(
+            WorkerSpec(
+                worker_id=f"worker_{letter.lower()}",
+                name=f"Worker {letter}",
+                recovery_priority=priorities[i % len(priorities)],
+                first_lock=first_lid,
+                second_lock=second_lid,
+                max_claim={first_lid: 1, second_lid: 1},
+            )
+        )
+
+    return ScenarioDefinition(
+        scenario_key="deadlock_demo",
+        workload_name="Circular Deadlock",
+        description=f"{n}-process circular wait using Windows Named Mutexes (backward-compatible deadlock_demo.py)",
+        resources=resources,
+        workers=workers,
+        default_max_procs=max(4, n + 2),
+        default_cpu_cap=20,
+        default_job_mem_mb=512,
+        default_proc_mem_mb=256,
+        default_timeout=120,
+        default_delay=0.35,
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Controlled Deadlock Demo Workload")
-    parser.add_argument("pos_locks", nargs="?", type=int, default=None)
-    parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--delay", type=float, default=0.5)
-    parser.add_argument("--timeout", type=int, default=15, help="Total execution timeout in seconds")
-    parsed, _ = parser.parse_known_args()
-
-    num_locks = parsed.workers if parsed.workers is not None else (
-        parsed.pos_locks if parsed.pos_locks is not None else 2
-    )
-    num_locks = max(2, min(4, num_locks))
-    max_duration = max(5, min(30, parsed.timeout))
-
-    try:
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-    except Exception:
-        pass
-
-    print(f"[SAFE DEADLOCK DEMO] PID: {os.getpid()}")
-    print(f"[SAFE DEADLOCK DEMO] Creating {num_locks} mutexes for circular dependency...")
-    print(f"[SAFE DEADLOCK DEMO] Maximum execution timeout: {max_duration}s")
-
-    locks = [threading.Lock() for _ in range(num_locks)]
-    lock_names = [f"Mutex-{i}" for i in range(num_locks)]
-    deadlocked = threading.Event()
-
-    def worker(thread_id, first_idx, second_idx):
-        first_lock = locks[first_idx]
-        second_lock = locks[second_idx]
-        first_name = lock_names[first_idx]
-        second_name = lock_names[second_idx]
-
-        print(f"  Worker-{thread_id}: Requesting {first_name}...")
-        first_lock.acquire()
-        print(f"  Worker-{thread_id}: Acquired {first_name}. Holding for {parsed.delay}s...")
-        time.sleep(parsed.delay)
-
-        print(f"  Worker-{thread_id}: Requesting {second_name} (creates circular wait)...")
-        # Use a 5-second timeout on second lock so threads can break free safely
-        acquired = second_lock.acquire(timeout=5.0)
-
-        if acquired:
-            print(f"  Worker-{thread_id}: Acquired {second_name} (no deadlock)")
-            second_lock.release()
-        else:
-            print(f"  Worker-{thread_id}: TIMEOUT waiting for {second_name} — CIRCULAR WAIT DEADLOCK!")
-            deadlocked.set()
-
-        first_lock.release()
-
-    threads = []
-    for i in range(num_locks):
-        first = i
-        second = (i + 1) % num_locks
-        t = threading.Thread(
-            target=worker,
-            args=(i, first, second),
-            daemon=True,
-            name=f"DeadlockWorker-{i}",
-        )
-        threads.append(t)
-
-    print(f"[SAFE DEADLOCK DEMO] Starting {num_locks} threads with circular lock order...")
-    for t in threads:
-        t.start()
-
-    # Wait for completion or watchdog timeout
-    start_time = time.time()
-    for t in threads:
-        remaining = max(0.1, max_duration - (time.time() - start_time))
-        t.join(timeout=remaining)
-        if stop_event.is_set():
-            break
-
-    if deadlocked.is_set():
-        print(f"\n[SAFE DEADLOCK DEMO] *** DEADLOCK DETECTED & DEMONSTRATED ***")
-        print(f"[SAFE DEADLOCK DEMO] Circular wait occurred as planned.")
-    else:
-        print(f"\n[SAFE DEADLOCK DEMO] Mutex sequence finished.")
-
-    print(f"[SAFE DEADLOCK DEMO] Cleaning up and exiting cleanly.")
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--workers", type=int, default=2)
+    pre_args, _ = pre.parse_known_args()
+    run_deadlock_scenario(build_scenario(pre_args.workers), Path(__file__))
 
 
 if __name__ == "__main__":

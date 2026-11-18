@@ -222,6 +222,14 @@ const App = (() => {
                         if (typeof Isolation !== 'undefined' && data.sandboxes) {
                             Isolation.updateFromTelemetry(data.sandboxes);
                         }
+                        // Update live deadlock monitor if present
+                        if (typeof DeadlockGraph !== 'undefined' && DeadlockGraph.updateFromTelemetry && data.live_deadlock) {
+                            DeadlockGraph.updateFromTelemetry(data.live_deadlock);
+                        }
+                    } else if (data.type === 'live_deadlock_update') {
+                        if (typeof DeadlockGraph !== 'undefined' && DeadlockGraph.handleLiveSnapshotPush) {
+                            DeadlockGraph.handleLiveSnapshotPush(data);
+                        }
                     }
                 } catch (e) {
                     console.error('[WebSocket] Failed to parse message:', e);

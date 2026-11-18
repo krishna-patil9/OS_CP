@@ -23,9 +23,9 @@ import asyncio
 import logging
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +38,16 @@ from backend.system_monitor import SystemMonitor
 from backend.isolation_engine import IsolationEngine, SandboxConfig, is_critical_process
 from backend.policy_engine import PolicyEngine, PolicyConfig
 from backend.deadlock_engine import WaitForGraph, BankersAlgorithm, DeadlockScenarioBuilder, ProcessNode, Resource
+from backend.live_deadlock_manager import (
+    DEFAULT_CPU_RATE_PERCENT,
+    DEFAULT_JOB_MEMORY_LIMIT_MB,
+    DEFAULT_MAX_ACTIVE_PROCESSES,
+    DEFAULT_MAX_RUNTIME_SECONDS,
+    DEFAULT_PER_PROCESS_MEMORY_LIMIT_MB,
+    LiveAuthError,
+    LiveDeadlockManager,
+    LiveValidationError,
+)
 from backend.simulator_engine import MLFQScheduler, MLFQProcess, MLFQConfig, PageReplacementSimulator
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -58,10 +68,12 @@ monitor = SystemMonitor(interval=2.0)
 isolation = IsolationEngine()
 policy = PolicyEngine(monitor, isolation)
 bankers = BankersAlgorithm()
+live_deadlock = LiveDeadlockManager(isolation, bankers)
 page_sim = PageReplacementSimulator()
 
-# Deadlock WFG (pre-initialized with circular_wait scenario so endpoints are never empty)
-wfg = DeadlockScenarioBuilder.circular_wait_scenario()
+# Practice WFG starts empty (never pre-populated with dummy circular-wait nodes)
+wfg = WaitForGraph()
+main_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Execution Mode: "normal" (default) or "testing"
 current_execution_mode = "normal"
@@ -127,6 +139,8 @@ class SandboxCreateRequest(BaseModel):
     name: str
     cpu_rate_percent: Optional[int] = None
     memory_limit_mb: Optional[int] = None
+    per_process_memory_limit_mb: Optional[int] = None
+    job_memory_limit_mb: Optional[int] = None
     max_active_processes: Optional[int] = None
     priority_class: Optional[str] = None
     kill_on_close: bool = True
@@ -135,6 +149,8 @@ class SandboxCreateRequest(BaseModel):
 class SandboxUpdateRequest(BaseModel):
     cpu_rate_percent: Optional[int] = None
     memory_limit_mb: Optional[int] = None
+    per_process_memory_limit_mb: Optional[int] = None
+    job_memory_limit_mb: Optional[int] = None
     max_active_processes: Optional[int] = None
     priority_class: Optional[str] = None
     max_working_set_mb: Optional[int] = None
@@ -205,12 +221,70 @@ class WorkloadRequest(BaseModel):
     args: List[str] = []
     sandbox_name: Optional[str] = None
 
+class LiveRunRegisterRequest(BaseModel):
+    supervisor_pid: int
+    supervisor_tid: int
+    supervisor_create_time_100ns: int
+    workload_name: str = "deadlock_demo"
+    expected_workers: int = 2
+    resources: Optional[List[dict]] = None
+    cpu_rate_percent: int = DEFAULT_CPU_RATE_PERCENT
+    job_memory_limit_mb: int = DEFAULT_JOB_MEMORY_LIMIT_MB
+    per_process_memory_limit_mb: int = DEFAULT_PER_PROCESS_MEMORY_LIMIT_MB
+    max_active_processes: int = DEFAULT_MAX_ACTIVE_PROCESSES
+    max_runtime_seconds: int = DEFAULT_MAX_RUNTIME_SECONDS
+    priority_class: Optional[str] = None
+    kill_on_close: bool = True
+
+class LiveWorkerRegisterRequest(BaseModel):
+    worker_id: str
+    name: str
+    pid: int
+    tid: int
+    create_time_100ns: int
+    recovery_priority: int
+    max_claim: Dict[str, int]
+
+class LiveSyncEventRequest(BaseModel):
+    worker_id: str
+    pid: int
+    tid: int
+    create_time_100ns: int
+    event_type: str
+    resource_id: Optional[str] = None
+    os_mutex_name: Optional[str] = None
+    seq: int = 0
+    wait_result: Optional[str] = None
+    wait_code: Optional[int] = None
+    abandoned: bool = False
+    state_validated: bool = False
+    released_after_abandoned: bool = False
+    exit_code: Optional[int] = None
+    details: str = ""
+
+class LiveHeartbeatRequest(BaseModel):
+    actor_pid: int
+    actor_role: str = "supervisor"
+    worker_id: Optional[str] = None
+
+class LiveRecoverRequest(BaseModel):
+    sandbox_name: str
+    pid: int
+    create_time_100ns: int
+    approved: bool = False
+    operator_note: str = ""
+
+class LiveCompleteRequest(BaseModel):
+    outcome_note: str = "Supervisor completed cleanly"
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Startup / Shutdown
 # ──────────────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
+    global main_event_loop
+    main_event_loop = asyncio.get_running_loop()
     monitor.start()
     policy.start()
     logger.info(f"All engines started [Execution Mode: {current_execution_mode.upper()}]")
@@ -218,6 +292,12 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     logger.info("Initiating graceful shutdown...")
+    # 0. Clean up live deadlock runs & watchdogs
+    try:
+        live_deadlock.cleanup_all()
+    except Exception as e:
+        logger.warning(f"Error cleaning up live deadlock runs: {e}")
+
     # 1. Kill spawned workloads using tree-kill
     for wid, proc in list(spawned_workloads.items()):
         try:
@@ -281,6 +361,37 @@ async def set_execution_mode(req: ModeRequest):
 
 connected_websockets: set = set()
 
+
+async def _broadcast_live_deadlock_update(snapshot: dict):
+    if not connected_websockets:
+        return
+    message = {
+        "type": "live_deadlock_update",
+        "timestamp": time.time(),
+        "live_deadlock": live_deadlock.get_telemetry_summary(),
+        "snapshot": snapshot,
+    }
+    dead = []
+    for ws in list(connected_websockets):
+        try:
+            await ws.send_json(message)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        connected_websockets.discard(ws)
+
+
+def _on_live_deadlock_snapshot_changed(snapshot: dict):
+    loop = main_event_loop
+    if loop is not None and loop.is_running() and connected_websockets:
+        try:
+            asyncio.run_coroutine_threadsafe(_broadcast_live_deadlock_update(snapshot), loop)
+        except Exception:
+            pass
+
+
+live_deadlock.add_update_callback(_on_live_deadlock_snapshot_changed)
+
 @app.websocket("/ws/telemetry")
 async def telemetry_websocket(websocket: WebSocket):
     """Stream system telemetry at ~2.0s intervals via WebSocket."""
@@ -308,6 +419,7 @@ async def telemetry_websocket(websocket: WebSocket):
                 "sandboxes": sandboxes,
                 "process_categories": categories,
                 "policy_stats": policy.get_stats(),
+                "live_deadlock": live_deadlock.get_telemetry_summary(),
             }
 
             await websocket.send_json(payload)
@@ -374,13 +486,20 @@ async def create_sandbox(req: SandboxCreateRequest):
             name=req.name,
             cpu_rate_percent=req.cpu_rate_percent,
             memory_limit_mb=req.memory_limit_mb,
+            per_process_memory_limit_mb=req.per_process_memory_limit_mb,
+            job_memory_limit_mb=req.job_memory_limit_mb,
             max_active_processes=req.max_active_processes,
             priority_class=req.priority_class,
             kill_on_close=req.kill_on_close,
             max_working_set_mb=req.max_working_set_mb,
         )
-        isolation.create_sandbox(config)
-        return {"status": "created", "name": req.name}
+        container = isolation.create_sandbox(config)
+        return {
+            "status": "created",
+            "name": req.name,
+            "job_name": container.job_name,
+            "verified_limits": container.verified_limits,
+        }
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -606,6 +725,7 @@ async def banker_check(req: BankerRequest):
     return {
         "is_safe": result.is_safe,
         "safe_sequence": result.safe_sequence,
+        "finish_flags": result.finish_flags,
         "available": result.available,
         "allocation_matrix": result.allocation_matrix,
         "need_matrix": result.need_matrix,
@@ -649,9 +769,191 @@ async def get_banker_scenario(scenario_id: str):
         "result": {
             "is_safe": result.is_safe,
             "safe_sequence": result.safe_sequence,
+            "finish_flags": result.finish_flags,
             "need_matrix": result.need_matrix,
         },
     }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# REST API: Real-Time Windows-Native Live Deadlock Detection & Selective Recovery
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _raise_live_http_error(exc: Exception):
+    if isinstance(exc, LiveAuthError):
+        raise HTTPException(401, str(exc))
+    if isinstance(exc, PermissionError):
+        raise HTTPException(403, str(exc))
+    if isinstance(exc, KeyError):
+        raise HTTPException(404, str(exc))
+    if isinstance(exc, (LiveValidationError, ValueError)):
+        raise HTTPException(400, str(exc))
+    raise HTTPException(500, str(exc))
+
+@app.post("/api/deadlock/live/runs/register")
+async def register_live_deadlock_run(req: LiveRunRegisterRequest):
+    """
+    Register an independent Windows workload run, create & verify a dedicated
+    Windows NT Job Object sandbox, attach the supervisor PID, and return a
+    unique secret per-run authentication token.
+    """
+    try:
+        return live_deadlock.register_run(
+            supervisor_pid=req.supervisor_pid,
+            supervisor_tid=req.supervisor_tid,
+            supervisor_create_time_100ns=req.supervisor_create_time_100ns,
+            workload_name=req.workload_name,
+            expected_workers=req.expected_workers,
+            resources=req.resources,
+            cpu_rate_percent=req.cpu_rate_percent,
+            job_memory_limit_mb=req.job_memory_limit_mb,
+            per_process_memory_limit_mb=req.per_process_memory_limit_mb,
+            max_active_processes=req.max_active_processes,
+            max_runtime_seconds=req.max_runtime_seconds,
+            priority_class=req.priority_class,
+            kill_on_close=req.kill_on_close,
+        )
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.post("/api/deadlock/live/runs/{run_id}/workers")
+async def register_live_worker(
+    run_id: str,
+    req: LiveWorkerRegisterRequest,
+    x_run_token: Optional[str] = Header(None, alias="X-Run-Token"),
+):
+    """Register a child worker process and verify Windows Job Object inheritance."""
+    try:
+        return live_deadlock.register_worker(
+            run_id=run_id,
+            run_token=x_run_token,
+            worker_id=req.worker_id,
+            name=req.name,
+            pid=req.pid,
+            tid=req.tid,
+            create_time_100ns=req.create_time_100ns,
+            recovery_priority=req.recovery_priority,
+            max_claim=req.max_claim,
+        )
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.post("/api/deadlock/live/runs/{run_id}/events")
+async def ingest_live_sync_event(
+    run_id: str,
+    req: LiveSyncEventRequest,
+    x_run_token: Optional[str] = Header(None, alias="X-Run-Token"),
+):
+    """Ingest a real, sequenced synchronization event from an authenticated worker."""
+    try:
+        return live_deadlock.record_sync_event(
+            run_id=run_id,
+            run_token=x_run_token,
+            worker_id=req.worker_id,
+            pid=req.pid,
+            tid=req.tid,
+            create_time_100ns=req.create_time_100ns,
+            event_type=req.event_type,
+            resource_id=req.resource_id,
+            os_mutex_name=req.os_mutex_name,
+            seq=req.seq,
+            wait_result=req.wait_result,
+            wait_code=req.wait_code,
+            abandoned=req.abandoned,
+            state_validated=req.state_validated,
+            released_after_abandoned=req.released_after_abandoned,
+            exit_code=req.exit_code,
+            details=req.details,
+        )
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.post("/api/deadlock/live/runs/{run_id}/heartbeat")
+async def live_run_heartbeat(
+    run_id: str,
+    req: LiveHeartbeatRequest,
+    x_run_token: Optional[str] = Header(None, alias="X-Run-Token"),
+):
+    """Receive supervisor or worker heartbeat and return watchdog remaining time."""
+    try:
+        return live_deadlock.record_heartbeat(
+            run_id=run_id,
+            run_token=x_run_token,
+            actor_pid=req.actor_pid,
+            actor_role=req.actor_role,
+            worker_id=req.worker_id,
+        )
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.get("/api/deadlock/live/runs")
+async def list_live_deadlock_runs():
+    """List active and recent live Windows-native deadlock runs (never exposes secret tokens)."""
+    return {"runs": live_deadlock.list_runs()}
+
+@app.get("/api/deadlock/live/runs/{run_id}")
+async def get_live_deadlock_run(run_id: str):
+    """Get full live state (sandbox, workers, RAG/WFG, DFS, Banker's, events, watchdog)."""
+    try:
+        return live_deadlock.get_run(run_id)
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.get("/api/deadlock/live/runs/{run_id}/recovery-challenge")
+async def get_live_recovery_challenge(run_id: str):
+    """Get active deadlock-bound recovery challenge metadata for explicit UI operator approval."""
+    try:
+        return live_deadlock.get_recovery_challenge(run_id)
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.post("/api/deadlock/live/runs/{run_id}/recover")
+async def approve_live_deadlock_recovery(
+    run_id: str,
+    req: LiveRecoverRequest,
+    x_run_token: Optional[str] = Header(None, alias="X-Run-Token"),
+    x_recovery_token: Optional[str] = Header(None, alias="X-Recovery-Token"),
+):
+    """
+    Execute explicit user-approved selective recovery: terminates ONLY the approved
+    worker process via TerminateProcess while keeping the Job Object and supervisor active.
+    """
+    try:
+        return live_deadlock.approve_and_recover(
+            run_id=run_id,
+            sandbox_name=req.sandbox_name,
+            pid=req.pid,
+            create_time_100ns=req.create_time_100ns,
+            approved=req.approved,
+            run_token=x_run_token,
+            recovery_token=x_recovery_token,
+            operator_note=req.operator_note,
+        )
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.post("/api/deadlock/live/runs/{run_id}/complete")
+async def complete_live_deadlock_run(
+    run_id: str,
+    req: LiveCompleteRequest,
+    x_run_token: Optional[str] = Header(None, alias="X-Run-Token"),
+):
+    """Complete a live deadlock run and schedule Job Object cleanup."""
+    try:
+        return live_deadlock.complete_run(
+            run_id=run_id,
+            run_token=x_run_token,
+            outcome_note=req.outcome_note,
+        )
+    except Exception as e:
+        _raise_live_http_error(e)
+
+@app.delete("/api/deadlock/live/runs/{run_id}")
+async def abort_live_deadlock_run(run_id: str):
+    """Explicitly abort a live run and tear down its entire Job Object."""
+    try:
+        return live_deadlock.abort_run(run_id)
+    except Exception as e:
+        _raise_live_http_error(e)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # REST API: MLFQ Scheduler Simulator
@@ -737,6 +1039,9 @@ async def launch_workload(req: WorkloadRequest):
         "cpu_hog": "cpu_hog.py",
         "memory_hog": "memory_hog.py",
         "deadlock_demo": "deadlock_demo.py",
+        "circular_deadlock": "circular_deadlock.py",
+        "dining_philosophers": "dining_philosophers.py",
+        "multi_resource_deadlock": "multi_resource_deadlock.py",
         "sandboxed_app": "sandboxed_app.py",
     }
 

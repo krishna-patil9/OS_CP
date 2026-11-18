@@ -162,7 +162,7 @@ const Workloads = (() => {
     async function launchDeadlockDemo() {
         if (!checkTestingMode()) return;
 
-        if (!confirm('Launch synthetic Mutex Deadlock demonstration (2 threads, circular wait, 15s watchdog timeout)?')) {
+        if (!confirm('Launch live Windows-native Mutex Deadlock demo (Supervisor + 2 child worker processes in a dedicated Windows Job Object, 120s watchdog)?')) {
             return;
         }
 
@@ -172,13 +172,13 @@ const Workloads = (() => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workload_type: 'deadlock_demo',
-                    args: ['--workers', '2', '--delay', '0.5', '--timeout', '15']
+                    args: ['--workers', '2', '--delay', '0.4', '--timeout', '120']
                 })
             });
 
             if (res.ok) {
                 const data = await res.json();
-                App.showToast(`Launched Deadlock Demo (PID ${data.pid}) with mutex order inversion!`, 'warning');
+                App.showToast(`Launched Live Deadlock Demo (Supervisor PID ${data.pid}) — switch to Deadlock tab to monitor & approve recovery.`, 'warning');
                 fetchWorkloads();
             } else {
                 const err = await res.json();
