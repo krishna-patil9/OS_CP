@@ -30,6 +30,7 @@ const DeadlockGraph = (() => {
     let lastRenderedVersion = -1;
     let knownActiveIds = new Set();
     let watchdogTickTimer = null;
+    let isRecovering = false;
 
     // ── Friendly Formatting Helpers ──────────────────────────────────────────
 
@@ -611,7 +612,10 @@ const DeadlockGraph = (() => {
                 const holdsText = holdsList.length ? holdsList.join(', ') : 'its locks';
                 const victimName = cleanName(victim.name);
 
-                if (btnApprove) btnApprove.textContent = `Stop ${victimName} (Recommended)`;
+                if (btnApprove && !isRecovering) {
+                    btnApprove.disabled = false;
+                    btnApprove.textContent = `Approve & Terminate ${victimName}`;
+                }
                 if (recDetail) {
                     recDetail.innerHTML = `
                         Recommended to stop <strong>${escapeHtml(victimName)}</strong> (PID ${victim.pid}, Priority ${victim.recovery_priority} — lowest in the deadlock cycle).
@@ -640,7 +644,15 @@ const DeadlockGraph = (() => {
                 outcomeBox.style.display = 'block';
                 outcomeBox.style.background = 'var(--status-success-bg)';
                 outcomeBox.style.border = '1px solid var(--status-success)';
-                outcomeBox.innerHTML = `<strong style="color: var(--status-success-text);">Deadlock Resolved:</strong> Only the approved worker was stopped. Surviving workers recovered the abandoned lock, verified shared data, and completed cleanly.`;
+                outcomeBox.innerHTML = `
+                    <div style="font-weight: 700; color: var(--status-success-text); margin-bottom: 4px;">Deadlock Resolved</div>
+                    <div style="color: var(--text-primary); font-size: 0.82rem; line-height: 1.5;">
+                        Selected worker terminated successfully.<br>
+                        Surviving worker recovered the abandoned mutex.<br>
+                        No active deadlock cycle remains.<br>
+                        Banker's safety analysis completed.
+                    </div>
+                `;
             } else {
                 outcomeBox.style.display = 'none';
             }
@@ -1534,43 +1546,80 @@ const DeadlockGraph = (() => {
 
     // ── Explicit User-Approved Selective Recovery & Abort ────────────────────
 
+    function formatBackendError(detail, fallback) {
+        const raw = typeof detail === 'string' && detail.trim() ? detail.trim() : fallback;
+        // Never duplicate prefixes like "Recovery rejected: Recovery rejected: ..."
+        return raw.replace(/^(Recovery rejected:\s*)+/i, '').trim() || fallback;
+    }
+
     async function approveLiveRecovery() {
+        if (isRecovering) return;
         if (!currentLiveRun || !currentLiveRun.is_active_run || !currentLiveRun.deadlock_detection?.recommended_victim_details) {
             App.showToast('No active deadlocked worker available to stop.', 'warning');
             return;
         }
         const runId = currentLiveRun.run_id;
+        const snapshotVersion = currentLiveRun.snapshot_version;
         const victim = currentLiveRun.deadlock_detection.recommended_victim_details;
         const victimName = cleanName(victim.name);
 
         const ok = confirm(
-            `Stop ${victimName} (PID ${victim.pid}) to break the deadlock?\n\n` +
+            `Approve & Terminate ${victimName} (PID ${victim.pid}) to break the deadlock?\n\n` +
             `• Scenario: ${currentLiveRun.workload_name}\n` +
             `• Priority: ${victim.recovery_priority} (lowest in cycle)\n` +
-            `• Only ${victimName} will be stopped; the supervisor and sandbox remain active.`
+            `• Only ${victimName} will be terminated; the supervisor and sandbox remain active.`
         );
         if (!ok) return;
 
+        const btnApprove = document.getElementById('btnApproveLiveRecovery');
+        const btnAbort = document.getElementById('btnAbortLiveRun');
+        isRecovering = true;
+        if (btnApprove) {
+            btnApprove.disabled = true;
+            btnApprove.textContent = 'Authorizing & Recovering...';
+        }
+        if (btnAbort) btnAbort.disabled = true;
+
         try {
-            const chRes = await fetch(`/api/deadlock/live/runs/${runId}/recovery-challenge`);
-            if (!chRes.ok) {
-                const err = await chRes.json();
-                App.showToast(`Recovery check failed: ${err.detail || 'Error'}`, 'error');
+            // Step 1: Request a short-lived, single-use, deadlock-bound recovery authorization from backend
+            const authRes = await fetch(`/api/deadlock/live/runs/${runId}/recovery-authorization`, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    victim_pid: victim.pid,
+                    snapshot_version: snapshotVersion,
+                }),
+            });
+
+            if (!authRes.ok) {
+                const err = await authRes.json().catch(() => ({}));
+                App.showToast(formatBackendError(err.detail, 'Recovery authorization required'), 'error');
+                await fetchLiveRunDetail(runId);
                 return;
             }
-            const challenge = await chRes.json();
 
+            const auth = await authRes.json();
+            if (!auth || !auth.token || !auth.create_time_100ns_str) {
+                App.showToast('Recovery authorization required', 'error');
+                return;
+            }
+
+            // Step 2: Submit authenticated selective recovery using exact 64-bit create_time_100ns_str
             const recRes = await fetch(`/api/deadlock/live/runs/${runId}/recover`, {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Recovery-Token': challenge.token,
+                    'X-Recovery-Token': auth.token,
                 },
                 body: JSON.stringify({
-                    sandbox_name: challenge.sandbox_name,
-                    pid: challenge.pid,
-                    create_time_100ns: challenge.create_time_100ns,
+                    sandbox_name: auth.sandbox_name,
+                    pid: auth.pid,
+                    create_time_100ns: auth.create_time_100ns_str,
                     approved: true,
+                    snapshot_version: auth.snapshot_version,
+                    deadlock_cycle: auth.deadlock_cycle,
                     operator_note: 'Approved from dashboard',
                 }),
             });
@@ -1578,18 +1627,30 @@ const DeadlockGraph = (() => {
             if (recRes.ok) {
                 const data = await recRes.json();
                 if (data.run) applyAuthoritativeSnapshot(data.run);
-                App.showToast(
-                    data.deadlock_resolved
-                        ? `Deadlock resolved! Stopped ${victimName} and remaining workers recovered.`
-                        : `Stopped ${victimName}; re-checking dependency graph.`,
-                    data.deadlock_resolved ? 'success' : 'warning'
-                );
+                if (data.deadlock_resolved) {
+                    App.showToast(
+                        `Deadlock Resolved — ${victimName} terminated, abandoned mutex recovered, Banker's safety verified.`,
+                        'success'
+                    );
+                } else {
+                    App.showToast(`Terminated ${victimName}; re-evaluating remaining dependencies.`, 'warning');
+                }
             } else {
-                const err = await recRes.json();
-                App.showToast(`Recovery blocked: ${err.detail || 'Error'}`, 'error');
+                // Preserve real live deadlock state on rejection; never duplicate error text
+                const err = await recRes.json().catch(() => ({}));
+                App.showToast(formatBackendError(err.detail, 'Recovery authorization failed'), 'error');
+                await fetchLiveRunDetail(runId);
             }
         } catch (e) {
             App.showToast(`Recovery request failed: ${e.message}`, 'error');
+        } finally {
+            isRecovering = false;
+            if (btnAbort) btnAbort.disabled = false;
+            if (btnApprove && currentLiveRun && currentLiveRun.is_active_run && currentLiveRun.deadlock_detection?.recommended_victim_details) {
+                btnApprove.disabled = false;
+                const vName = cleanName(currentLiveRun.deadlock_detection.recommended_victim_details.name);
+                btnApprove.textContent = `Approve & Terminate ${vName}`;
+            }
         }
     }
 

@@ -23,9 +23,10 @@ import asyncio
 import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,7 +45,9 @@ from backend.live_deadlock_manager import (
     DEFAULT_MAX_ACTIVE_PROCESSES,
     DEFAULT_MAX_RUNTIME_SECONDS,
     DEFAULT_PER_PROCESS_MEMORY_LIMIT_MB,
+    DEFAULT_RECOVERY_AUTH_TTL_SECONDS,
     LiveAuthError,
+    LiveConflictError,
     LiveDeadlockManager,
     LiveValidationError,
 )
@@ -267,11 +270,18 @@ class LiveHeartbeatRequest(BaseModel):
     actor_role: str = "supervisor"
     worker_id: Optional[str] = None
 
+class LiveRecoveryAuthRequest(BaseModel):
+    victim_pid: Optional[int] = None
+    snapshot_version: Optional[int] = None
+    ttl_seconds: Optional[float] = None
+
 class LiveRecoverRequest(BaseModel):
     sandbox_name: str
     pid: int
-    create_time_100ns: int
+    create_time_100ns: Union[int, str]
     approved: bool = False
+    snapshot_version: Optional[int] = None
+    deadlock_cycle: Optional[List[str]] = None
     operator_note: str = ""
 
 class LiveCompleteRequest(BaseModel):
@@ -781,6 +791,8 @@ async def get_banker_scenario(scenario_id: str):
 def _raise_live_http_error(exc: Exception):
     if isinstance(exc, LiveAuthError):
         raise HTTPException(401, str(exc))
+    if isinstance(exc, LiveConflictError):
+        raise HTTPException(409, str(exc))
     if isinstance(exc, PermissionError):
         raise HTTPException(403, str(exc))
     if isinstance(exc, KeyError):
@@ -788,6 +800,31 @@ def _raise_live_http_error(exc: Exception):
     if isinstance(exc, (LiveValidationError, ValueError)):
         raise HTTPException(400, str(exc))
     raise HTTPException(500, str(exc))
+
+
+def _assert_same_origin_dashboard(request: Request):
+    """
+    Ensure recovery authorization tokens are only issued to the same-origin
+    local dashboard session (blocking cross-site/cross-origin browser requests).
+    """
+    host = (request.headers.get("host") or "").lower().strip()
+    sec_fetch_site = (request.headers.get("sec-fetch-site") or "").lower().strip()
+    if sec_fetch_site and sec_fetch_site not in ("same-origin", "none"):
+        raise HTTPException(403, "Cross-origin recovery authorization is forbidden")
+
+    origin = (request.headers.get("origin") or "").strip()
+    if origin:
+        parsed_origin = urlparse(origin)
+        origin_host = (parsed_origin.netloc or "").lower().strip()
+        if not host or origin_host != host:
+            raise HTTPException(403, "Cross-origin recovery authorization is forbidden")
+
+    referer = (request.headers.get("referer") or "").strip()
+    if referer and not origin:
+        parsed_ref = urlparse(referer)
+        ref_host = (parsed_ref.netloc or "").lower().strip()
+        if host and ref_host and ref_host != host:
+            raise HTTPException(403, "Cross-origin recovery authorization is forbidden")
 
 @app.post("/api/deadlock/live/runs/register")
 async def register_live_deadlock_run(req: LiveRunRegisterRequest):
@@ -898,24 +935,56 @@ async def get_live_deadlock_run(run_id: str):
     except Exception as e:
         _raise_live_http_error(e)
 
+@app.post("/api/deadlock/live/runs/{run_id}/recovery-authorization")
+async def request_live_recovery_authorization(
+    run_id: str,
+    request: Request,
+    req: Optional[LiveRecoveryAuthRequest] = None,
+):
+    """
+    Issue a short-lived, single-use, deadlock-bound recovery authorization token
+    for the authorized same-origin dashboard session.
+    """
+    _assert_same_origin_dashboard(request)
+    try:
+        ttl = (
+            req.ttl_seconds
+            if (req is not None and req.ttl_seconds is not None)
+            else DEFAULT_RECOVERY_AUTH_TTL_SECONDS
+        )
+        return live_deadlock.issue_recovery_authorization(
+            run_id=run_id,
+            victim_pid=req.victim_pid if req is not None else None,
+            snapshot_version=req.snapshot_version if req is not None else None,
+            ttl_seconds=ttl,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        _raise_live_http_error(e)
+
 @app.get("/api/deadlock/live/runs/{run_id}/recovery-challenge")
-async def get_live_recovery_challenge(run_id: str):
-    """Get active deadlock-bound recovery challenge metadata for explicit UI operator approval."""
+async def get_live_recovery_challenge(run_id: str, request: Request):
+    """Backward-compatible alias for issuing active deadlock-bound recovery authorization."""
+    _assert_same_origin_dashboard(request)
     try:
         return live_deadlock.get_recovery_challenge(run_id)
+    except HTTPException:
+        raise
     except Exception as e:
         _raise_live_http_error(e)
 
 @app.post("/api/deadlock/live/runs/{run_id}/recover")
-async def approve_live_deadlock_recovery(
+def approve_live_deadlock_recovery(
     run_id: str,
     req: LiveRecoverRequest,
     x_run_token: Optional[str] = Header(None, alias="X-Run-Token"),
     x_recovery_token: Optional[str] = Header(None, alias="X-Recovery-Token"),
 ):
     """
-    Execute explicit user-approved selective recovery: terminates ONLY the approved
-    worker process via TerminateProcess while keeping the Job Object and supervisor active.
+    Execute explicit user-approved selective recovery in FastAPI's thread pool
+    (non-blocking so concurrent WAIT_ABANDONED / state_validated / released events
+    from surviving workers are ingested immediately while recovery verifies).
     """
     try:
         return live_deadlock.approve_and_recover(
@@ -926,6 +995,8 @@ async def approve_live_deadlock_recovery(
             approved=req.approved,
             run_token=x_run_token,
             recovery_token=x_recovery_token,
+            snapshot_version=req.snapshot_version,
+            deadlock_cycle=req.deadlock_cycle,
             operator_note=req.operator_note,
         )
     except Exception as e:

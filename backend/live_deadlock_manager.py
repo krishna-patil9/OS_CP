@@ -1046,7 +1046,7 @@ class LiveDeadlockManager:
         graph_data = wfg.get_graph_data()
         graph_data["snapshot_version"] = run.snapshot_version
 
-        # Update worker deadlocked state markers & approval challenge ONLY for active runs
+        # Update worker deadlocked state markers & invalidate stale recovery tokens on change
         if is_active_run and dl_result.has_deadlock:
             for wid in dl_result.involved_processes:
                 if wid in run.workers and run.workers[wid].state not in ("terminated_victim", "exited", "aborted", "timed_out"):
@@ -1054,27 +1054,20 @@ class LiveDeadlockManager:
             if run.status not in ("completed", "timed_out", "aborted", "recovering"):
                 run.status = "deadlocked"
 
-            # Issue or refresh deadlock-bound approval challenge for recommended victim
-            victim_wid = dl_result.recommended_victim
-            if victim_wid and victim_wid in run.workers:
-                vw = run.workers[victim_wid]
+            if bump_version:
+                # Snapshot version advanced (new sync/state transition) -> invalidate any prior authorizations
+                self._invalidate_recovery_authorizations_locked(run, "snapshot_changed")
+            else:
+                # Even without a version bump, invalidate if victim or cycle changed
+                cur_cycle = list(dl_result.cycles[0]) if dl_result.cycles else []
                 existing = run.approval_challenge
-                if (
-                    not existing
-                    or existing.get("worker_id") != victim_wid
-                    or existing.get("pid") != vw.pid
-                    or existing.get("create_time_100ns") != vw.create_time_100ns
+                if existing and (
+                    existing.get("worker_id") != dl_result.recommended_victim
+                    or existing.get("deadlock_cycle") != cur_cycle
                 ):
-                    run.approval_challenge = {
-                        "token": secrets.token_urlsafe(24),
-                        "sandbox_name": run.sandbox_name,
-                        "worker_id": victim_wid,
-                        "pid": vw.pid,
-                        "create_time_100ns": vw.create_time_100ns,
-                        "issued_at": now,
-                    }
+                    self._invalidate_recovery_authorizations_locked(run, "deadlock_or_victim_changed")
         else:
-            run.approval_challenge = None
+            self._invalidate_recovery_authorizations_locked(run, "deadlock_cleared_or_run_inactive")
             if run.status == "deadlocked":
                 run.status = "resolved"
 
@@ -1093,6 +1086,7 @@ class LiveDeadlockManager:
                 "pid": vw.pid,
                 "tid": vw.tid,
                 "create_time_100ns": vw.create_time_100ns,
+                "create_time_100ns_str": str(vw.create_time_100ns),
                 "recovery_priority": vw.recovery_priority,
                 "os_scheduling_priority": vw.os_scheduling_priority,
                 "allocated": dict(vw.allocated),
@@ -1175,6 +1169,7 @@ class LiveDeadlockManager:
                 "pid": run.supervisor_pid,
                 "tid": run.supervisor_tid,
                 "create_time_100ns": run.supervisor_create_time_100ns,
+                "create_time_100ns_str": str(run.supervisor_create_time_100ns),
                 "alive": sup_alive,
                 "role": "supervisor",
                 "eligible_for_victim": False,
@@ -1186,6 +1181,7 @@ class LiveDeadlockManager:
                     "pid": w.pid,
                     "tid": w.tid,
                     "create_time_100ns": w.create_time_100ns,
+                    "create_time_100ns_str": str(w.create_time_100ns),
                     "recovery_priority": w.recovery_priority,
                     "os_scheduling_priority": w.os_scheduling_priority,
                     "in_job_verified": w.in_job_verified,
@@ -1385,66 +1381,180 @@ class LiveDeadlockManager:
 
     # ── 5. Explicit User-Approved Selective Victim Recovery ───────────────
 
-    def get_recovery_challenge(self, run_id: str) -> dict:
+    def issue_recovery_authorization(
+        self,
+        run_id: str,
+        victim_pid: Optional[int] = None,
+        snapshot_version: Optional[int] = None,
+        ttl_seconds: float = DEFAULT_RECOVERY_AUTH_TTL_SECONDS,
+    ) -> dict:
         """
-        Return the active deadlock-bound recovery challenge metadata so the local
-        dashboard operator can explicitly approve terminating the exact deadlocked victim.
-        Never exposes the secret per-run workload `run_token`.
+        Issue a short-lived, single-use, cryptographically secure recovery token
+        bound strictly to the current active run, sandbox, victim PID, exact 64-bit
+        creation time, snapshot_version, and deadlock_cycle.
+
+        Never exposes the workload's secret `run_token` and never logs the token.
         """
         with self._lock:
             run = self._get_run_locked(run_id)
-            self._recompute_analysis_locked(run, bump_version=False, emit=False)
-            if not run.approval_challenge:
-                raise LiveValidationError(f"Run '{run_id}' does not currently have an active deadlock requiring recovery")
-            return dict(run.approval_challenge)
+            if run.status in ("completed", "timed_out", "aborted"):
+                raise LiveConflictError("Workload sandbox is no longer active")
+
+            sb = self._isolation.get_sandbox(run.sandbox_name)
+            if not sb or not sb.is_active:
+                raise LiveConflictError("Workload sandbox is no longer active")
+
+            snap = self._recompute_analysis_locked(run, bump_version=False, emit=False)
+            dl = snap["deadlock_detection"]
+            if not dl["has_deadlock"]:
+                raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+            if snapshot_version is not None and int(snapshot_version) != int(run.snapshot_version):
+                raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+            # Resolve target eligible victim (defaults to recommended lowest recovery-priority worker)
+            target_worker: Optional[LiveWorker] = None
+            if victim_pid is not None:
+                if int(victim_pid) == run.supervisor_pid or is_critical_process(int(victim_pid)):
+                    raise PermissionError("Selected process is no longer eligible")
+                for w in run.workers.values():
+                    if w.pid == int(victim_pid):
+                        target_worker = w
+                        break
+                if target_worker is None or target_worker.worker_id not in dl["involved_processes"]:
+                    raise PermissionError("Selected process is no longer eligible")
+            else:
+                rec_wid = dl.get("recommended_victim")
+                if rec_wid and rec_wid in run.workers:
+                    target_worker = run.workers[rec_wid]
+
+            if target_worker is None:
+                raise PermissionError("Selected process is no longer eligible")
+
+            if not psutil.pid_exists(target_worker.pid):
+                raise LiveConflictError("Selected worker has already terminated")
+
+            # Confirm exact creation time and Job Object membership before authorizing
+            verify = self._isolation.verify_process_in_sandbox(
+                run.sandbox_name,
+                target_worker.pid,
+                expected_create_time_100ns=target_worker.create_time_100ns,
+            )
+            if not verify.get("identity_match") or not verify.get("in_job"):
+                raise PermissionError("Selected process is no longer eligible")
+
+            now = time.time()
+            ttl = max(1.0, min(120.0, float(ttl_seconds)))
+            token = secrets.token_urlsafe(32)
+            cycle = list(dl["cycles"][0]) if dl.get("cycles") else sorted(list(dl["involved_processes"]))
+
+            record = {
+                "token": token,
+                "run_id": run.run_id,
+                "sandbox_name": run.sandbox_name,
+                "worker_id": target_worker.worker_id,
+                "worker_name": target_worker.name,
+                "pid": target_worker.pid,
+                "create_time_100ns": target_worker.create_time_100ns,
+                "create_time_100ns_str": str(target_worker.create_time_100ns),
+                "snapshot_version": int(run.snapshot_version),
+                "deadlock_cycle": cycle,
+                "issued_at": now,
+                "expires_at": now + ttl,
+                "ttl_seconds": ttl,
+                "used": False,
+                "invalidated": False,
+            }
+            run.recovery_authorizations[token] = record
+            run.approval_challenge = record
+
+            # Bound stored authorization history per run
+            if len(run.recovery_authorizations) > 25:
+                oldest_keys = sorted(
+                    run.recovery_authorizations.keys(),
+                    key=lambda k: run.recovery_authorizations[k]["issued_at"],
+                )[:-25]
+                for k in oldest_keys:
+                    run.recovery_authorizations.pop(k, None)
+
+            return {
+                "token": record["token"],
+                "run_id": record["run_id"],
+                "sandbox_name": record["sandbox_name"],
+                "worker_id": record["worker_id"],
+                "worker_name": record["worker_name"],
+                "pid": record["pid"],
+                "create_time_100ns": record["create_time_100ns"],
+                "create_time_100ns_str": record["create_time_100ns_str"],
+                "snapshot_version": record["snapshot_version"],
+                "deadlock_cycle": record["deadlock_cycle"],
+                "issued_at": record["issued_at"],
+                "expires_at": record["expires_at"],
+                "ttl_seconds": record["ttl_seconds"],
+            }
+
+    def get_recovery_challenge(self, run_id: str) -> dict:
+        """Backward-compatible alias that issues a deadlock-bound recovery authorization."""
+        return self.issue_recovery_authorization(run_id=run_id)
 
     def approve_and_recover(
         self,
         run_id: str,
         sandbox_name: str,
         pid: int,
-        create_time_100ns: int,
+        create_time_100ns: Any,
         approved: bool,
         run_token: Optional[str] = None,
         recovery_token: Optional[str] = None,
+        snapshot_version: Optional[int] = None,
+        deadlock_cycle: Optional[List[str]] = None,
         operator_note: str = "",
     ) -> dict:
         """
         Perform selective recovery on explicit user approval:
-          1. Validate explicit approval flag & authentication token.
-          2. Validate sandbox ID matches active run.
-          3. Validate PID & creation time match a registered eligible worker (not supervisor).
-          4. Validate worker is still involved in an active deadlock.
-          5. Terminate ONLY the approved worker via TerminateProcess (never TerminateJobObject).
-          6. Confirm OS process exit.
-          7. Reconcile victim's held Windows Mutexes as OS-abandoned (never normal ReleaseMutex).
-          8. Verify supervisor & Job Object remain active.
-          9. Briefly wait for surviving worker(s) to receive WAIT_ABANDONED, validate state, and release.
-         10. Rebuild RAG & WFG and recalculate Banker's safety.
-         11. Report honest verification result.
+          1. Parse exact 64-bit create_time_100ns (accepts int or exact decimal string from JS).
+          2. Validate explicit approval flag & authentication token (X-Run-Token or deadlock-bound X-Recovery-Token).
+          3. Validate run & sandbox are active and match.
+          4. Validate PID & creation time match an eligible live worker inside the Job Object (never supervisor/critical).
+          5. Re-validate deadlock, cycle, and snapshot_version without mutating live state on rejection.
+          6. Mark single-use authorization consumed and terminate ONLY the approved worker via TerminateProcess.
+          7. Confirm exit, reconcile WAIT_ABANDONED, rebuild RAG/WFG, recalculate Banker's safety.
         """
         if not approved:
-            raise LiveValidationError("Explicit user approval (approved=true) is required for selective recovery")
+            raise LiveValidationError("Explicit approval is required to terminate a worker")
+
+        try:
+            exact_ct = int(str(create_time_100ns).strip())
+        except (ValueError, TypeError):
+            raise LiveValidationError("Invalid process creation timestamp")
 
         with self._lock:
             run = self._get_run_locked(run_id)
-            auth_mode = self._verify_recovery_auth_locked(
+
+            # Authenticate BEFORE exposing detailed state (still validates run/sandbox/pid/ct/snapshot/cycle/ttl/single-use)
+            auth_mode, auth_record = self._verify_recovery_auth_locked(
                 run,
                 run_token=run_token,
                 recovery_token=recovery_token,
                 sandbox_name=sandbox_name,
                 pid=pid,
-                create_time_100ns=create_time_100ns,
+                create_time_100ns=exact_ct,
+                snapshot_version=snapshot_version,
+                deadlock_cycle=deadlock_cycle,
             )
 
             if run.status in ("completed", "timed_out", "aborted"):
-                raise LiveValidationError(f"Cannot recover run '{run_id}' in terminal status '{run.status}'")
+                raise LiveConflictError("Workload sandbox is no longer active")
+
             if run.sandbox_name != sandbox_name:
-                raise LiveValidationError(
-                    f"Sandbox ID mismatch: run '{run_id}' owns '{run.sandbox_name}', got '{sandbox_name}'"
-                )
-            if pid == run.supervisor_pid:
-                raise PermissionError("Refusing to terminate the supervisor process during selective recovery")
+                raise PermissionError("Authorization does not match this workload")
+
+            sb = self._isolation.get_sandbox(run.sandbox_name)
+            if not sb or not sb.is_active:
+                raise LiveConflictError("Workload sandbox is no longer active")
+
+            if pid == run.supervisor_pid or is_critical_process(pid):
+                raise PermissionError("Selected process is no longer eligible")
 
             target_worker: Optional[LiveWorker] = None
             for w in run.workers.values():
@@ -1453,31 +1563,47 @@ class LiveDeadlockManager:
                     break
 
             if target_worker is None:
-                raise LiveValidationError(f"PID {pid} is not a registered worker in run '{run_id}'")
-            if target_worker.create_time_100ns != create_time_100ns:
-                raise PermissionError(
-                    f"PID {pid} creation time mismatch: expected {target_worker.create_time_100ns}, "
-                    f"got {create_time_100ns}"
-                )
+                raise PermissionError("Selected process is no longer eligible")
+            if target_worker.create_time_100ns != exact_ct:
+                raise PermissionError("Selected process is no longer eligible")
+            if target_worker.state in ("terminated_victim", "exited") or not psutil.pid_exists(pid):
+                raise LiveConflictError("Selected worker has already terminated")
 
-            # Re-verify worker is currently involved in a detected deadlock
-            pre_snapshot = self._recompute_analysis_locked(run)
+            # Verify Job Object membership right before termination
+            verify = self._isolation.verify_process_in_sandbox(
+                sandbox_name, pid, expected_create_time_100ns=exact_ct
+            )
+            if not verify.get("identity_match") or not verify.get("in_job"):
+                raise PermissionError("Selected process is no longer eligible")
+
+            # Re-verify deadlock, cycle, and snapshot_version WITHOUT bumping snapshot_version
+            pre_snapshot = self._recompute_analysis_locked(run, bump_version=False, emit=False)
             pre_dl = pre_snapshot["deadlock_detection"]
             if not pre_dl["has_deadlock"]:
-                raise LiveValidationError("No active deadlock exists to recover from")
+                raise LiveConflictError("Deadlock state changed; refresh analysis")
             if target_worker.worker_id not in pre_dl["involved_processes"]:
-                raise LiveValidationError(
-                    f"Worker '{target_worker.worker_id}' (PID {pid}) is not currently involved in the detected deadlock"
-                )
+                raise PermissionError("Selected process is no longer eligible")
+            if snapshot_version is not None and int(snapshot_version) != int(run.snapshot_version):
+                raise LiveConflictError("Deadlock state changed; refresh analysis")
+            current_cycle = list(pre_dl["cycles"][0]) if pre_dl.get("cycles") else sorted(list(pre_dl["involved_processes"]))
+            if deadlock_cycle is not None and list(deadlock_cycle) != current_cycle:
+                raise LiveConflictError("Deadlock state changed; refresh analysis")
+            if auth_record is not None and list(auth_record["deadlock_cycle"]) != current_cycle:
+                raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+            # Consume single-use recovery authorization and invalidate any other unused ones
+            if auth_record is not None:
+                auth_record["used"] = True
+                auth_record["used_at"] = time.time()
+            self._invalidate_recovery_authorizations_locked(run, "recovery_executed")
 
             run.status = "recovering"
-            run.approval_challenge = None  # Consume single-use challenge
 
             # Terminate ONLY this approved worker via TerminateProcess (Job Object remains active!)
             term_result = self._isolation.terminate_sandbox_process(
                 sandbox_name=sandbox_name,
                 pid=pid,
-                expected_create_time_100ns=create_time_100ns,
+                expected_create_time_100ns=exact_ct,
             )
 
             target_worker.state = "terminated_victim"
@@ -1545,7 +1671,8 @@ class LiveDeadlockManager:
                 "victim_worker_id": target_worker.worker_id,
                 "victim_name": target_worker.name,
                 "victim_pid": pid,
-                "victim_create_time_100ns": create_time_100ns,
+                "victim_create_time_100ns": exact_ct,
+                "victim_create_time_100ns_str": str(exact_ct),
                 "victim_recovery_priority": target_worker.recovery_priority,
                 "termination": term_result,
                 "abandoned_resources": abandoned_resources,
