@@ -1071,6 +1071,196 @@ body {
     color: var(--status-danger-text);
 }
 
+/* ── Live Deadlock Dashboard Refinement ──────────────────────────────────── */
+.dl-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+}
+
+.dl-summary-tile {
+    background: var(--bg-surface-alt);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.dl-summary-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.dl-summary-value {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.dl-summary-sub {
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+}
+
+.dl-segmented {
+    display: inline-flex;
+    background: var(--bg-surface-alt);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+    gap: 2px;
+}
+
+.dl-seg-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    font-size: 0.76rem;
+    font-weight: 600;
+    padding: 5px 11px;
+    border-radius: calc(var(--radius-sm) - 2px);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dl-seg-btn:hover {
+    color: var(--text-primary);
+}
+
+.dl-seg-btn.active {
+    background: var(--accent-primary);
+    color: var(--text-on-accent);
+}
+
+.dl-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.dl-chip-hold {
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+}
+
+.dl-chip-wait {
+    background: var(--status-warning-bg);
+    color: var(--status-warning-text);
+    border: 1px solid rgba(185, 133, 50, 0.35);
+}
+
+.dl-chip-avail {
+    background: var(--status-success-bg);
+    color: var(--status-success-text);
+}
+
+.dl-chip-zero {
+    background: var(--status-danger-bg);
+    color: var(--status-danger-text);
+}
+
+.dl-chip-muted {
+    background: var(--bg-surface-raised);
+    color: var(--text-secondary);
+}
+
+.dl-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.dl-feed-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--radius-xs);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.dl-feed-time {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    margin-top: 1px;
+}
+
+.dl-feed-tag {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.dl-feed-tag.info { background: var(--status-info-bg); color: var(--status-info-text); }
+.dl-feed-tag.success { background: var(--status-success-bg); color: var(--status-success-text); }
+.dl-feed-tag.warning { background: var(--status-warning-bg); color: var(--status-warning-text); }
+.dl-feed-tag.danger { background: var(--status-danger-bg); color: var(--status-danger-text); }
+
+.graph-tooltip {
+    position: absolute;
+    pointer-events: none;
+    z-index: 10;
+    background: rgba(50, 48, 53, 0.95);
+    color: #FFFCF7;
+    padding: 8px 11px;
+    border-radius: var(--radius-sm);
+    font-size: 0.76rem;
+    line-height: 1.45;
+    max-width: 240px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    display: none;
+}
+
+.graph-legend-line {
+    display: inline-block;
+    width: 18px;
+    height: 0;
+    border-top: 2px solid var(--accent-hover);
+}
+
+.graph-legend-line.dashed {
+    border-top: 2px dashed var(--status-warning);
+}
+
+.dl-avail-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+@media (max-width: 900px) {
+    .dl-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 560px) {
+    .dl-summary-grid { grid-template-columns: 1fr; }
+}
+
 /* ── MLFQ Visualizer ─────────────────────────────────────────────────────── */
 .mlfq-queues {
     display: flex;

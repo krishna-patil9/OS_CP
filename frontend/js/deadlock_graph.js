@@ -1,22 +1,24 @@
 /**
- * deadlock_graph.js — Live Windows-Native RAG/WFG & Banker's Algorithm Visualizer
+ * deadlock_graph.js — User-Friendly Live RAG / WFG & Banker's Algorithm Visualizer
  *
- * Strictly live-driven (NO dummy WFG graph, NO static Banker's matrices in live mode,
- * NO manual Sync Graphs toggle):
- *   - Automatically selects the newest active live workload upon registration
- *   - Renders Live Monitor, RAG/WFG Canvas, and Live Banker's Algorithm from a single
- *     authoritative `snapshot_version` (rejecting out-of-order / stale updates)
- *   - Keeps educational practice scenarios isolated in a separate collapsed section
- *   - Clears aborted/timed-out live state cleanly while preserving historical inspection
+ * Features:
+ *   - Plain, scannable user-facing copy (no raw internal jargon clutter)
+ *   - Topology-aware RAG & WFG layouts (diamond for 2-proc, perimeter-traced ring for
+ *     Dining Philosophers, separated cycle + branch for Multi-Resource)
+ *   - Automatic curved opposing arcs, exact node-border arrow clipping, pill-backed
+ *     edge labels, blueprint dot-grid canvas, and interactive node hover tooltips
+ *   - Strict live synchronization via WebSocket push + monotonic `snapshot_version` guard
+ *   - Zero dummy WFG graphs, zero static Banker's matrices in live mode
  */
 
 const DeadlockGraph = (() => {
-    let canvas, ctx;
+    let canvas, ctx, tooltipEl;
     let currentGraph = { nodes: [], edges: [], rag_edges: [], wfg_edges: [] };
     let currentResult = null;
     let animFrameId = null;
     let pulsePhase = 0;
-    let currentViewMode = 'rag'; // 'rag' (Process + Resource) or 'wfg' (Process only)
+    let currentViewMode = 'rag'; // 'rag' or 'wfg'
+    let hoveredNodeId = null;
 
     // Authoritative Live Run State
     let activeRuns = [];
@@ -29,8 +31,107 @@ const DeadlockGraph = (() => {
     let knownActiveIds = new Set();
     let watchdogTickTimer = null;
 
+    // ── Friendly Formatting Helpers ──────────────────────────────────────────
+
+    function cleanName(raw) {
+        if (!raw) return '';
+        return String(raw)
+            .replace(/\s*\(PID\s+\d+\)/gi, '')
+            .replace(/^worker_([a-z0-9]+)$/i, (_, k) => `Worker ${k.toUpperCase()}`)
+            .replace(/^philosopher_(\d+)$/i, (_, n) => `Philosopher ${n}`)
+            .replace(/_/g, ' ')
+            .trim();
+    }
+
+    function shortCanvasName(raw) {
+        return cleanName(raw).replace(/^Philosopher\s+/i, 'Phil ');
+    }
+
+    function friendlyRunStatus(status, recovered) {
+        const map = {
+            initializing: 'Starting',
+            running: 'Running',
+            deadlocked: 'Deadlocked',
+            recovering: 'Recovering',
+            resolved: 'Resolved',
+            completed: recovered ? 'Resolved' : 'Completed',
+            timed_out: 'Timed Out',
+            aborted: 'Aborted',
+        };
+        return map[status] || status || 'Unknown';
+    }
+
+    function friendlyWorkerState(state) {
+        const map = {
+            registered: { label: 'Ready', cls: 'idle' },
+            running: { label: 'Running', cls: 'normal' },
+            waiting: { label: 'Waiting', cls: 'above_normal' },
+            deadlocked: { label: 'Deadlocked', cls: 'high' },
+            recovering: { label: 'Recovering', cls: 'below_normal' },
+            terminated_victim: { label: 'Stopped (Victim)', cls: 'high' },
+            exited: { label: 'Finished', cls: 'normal' },
+            aborted: { label: 'Aborted', cls: 'idle' },
+            timed_out: { label: 'Timed Out', cls: 'idle' },
+        };
+        return map[state] || { label: state || 'Unknown', cls: 'idle' };
+    }
+
+    function friendlyActor(actor) {
+        if (!actor) return '';
+        return String(actor)
+            .replace(/\(PID=(\d+),\s*TID=\d+\)/g, '')
+            .replace(/\(PID=\d+\)/g, '')
+            .replace(/^WindowsKernel\(victim=([^,]+),\s*PID=\d+\)/, 'Windows OS')
+            .replace(/^Operator\([^)]+\)/, 'User')
+            .replace(/^DeadlockEngine$/, 'Detector')
+            .replace(/^IsolationEngine$/, 'Sandbox')
+            .trim();
+    }
+
+    function formatAuditEvent(ev) {
+        const who = friendlyActor(ev.actor);
+        const res = cleanName(ev.resource_id || '');
+        switch (ev.event_type) {
+            case 'run_registered':
+                return { tag: 'Sandbox Ready', cls: 'info', text: 'Windows sandbox created and resource limits verified.' };
+            case 'worker_registered':
+                return { tag: 'Joined', cls: 'info', text: `${who} joined and verified inside sandbox.` };
+            case 'acquired':
+                return { tag: 'Acquired', cls: 'info', text: `${who} acquired ${res}.` };
+            case 'wait_start':
+                return { tag: 'Waiting', cls: 'warning', text: `${who} is waiting for ${res}.` };
+            case 'victim_terminated':
+                return { tag: 'Victim Stopped', cls: 'danger', text: `Stopped selected victim process; sandbox kept active.` };
+            case 'mutex_abandoned':
+                return { tag: 'Lock Abandoned', cls: 'warning', text: `${res} was marked abandoned by Windows when its owner stopped.` };
+            case 'abandoned_acquired':
+                return { tag: 'Lock Recovered', cls: 'warning', text: `${who} took ownership of abandoned ${res} (WAIT_ABANDONED).` };
+            case 'state_validated':
+                return { tag: 'Data Checked', cls: 'success', text: `${who} verified shared data while holding ${res}.` };
+            case 'released':
+                return { tag: 'Released', cls: 'success', text: `${who} released ${res}.` };
+            case 'worker_exited':
+                return { tag: 'Finished', cls: 'success', text: `${who} completed cleanly.` };
+            case 'recovery_verified':
+                return { tag: 'Resolved', cls: 'success', text: 'Circular wait cleared and system returned to a SAFE state.' };
+            case 'run_completed':
+                return { tag: 'Completed', cls: 'success', text: 'Workload finished; scheduling sandbox cleanup.' };
+            case 'sandbox_cleaned_up':
+                return { tag: 'Cleaned Up', cls: 'info', text: 'Windows Job Object closed and released.' };
+            case 'run_aborted':
+                return { tag: 'Aborted', cls: 'danger', text: 'Workload stopped by user and sandbox cleared.' };
+            case 'watchdog_expired':
+                return { tag: 'Timed Out', cls: 'danger', text: 'Safety timer expired — emergency sandbox cleanup ran (not selective recovery).' };
+            default:
+                return { tag: cleanName(ev.event_type), cls: 'info', text: ev.details || '' };
+        }
+    }
+
+    // ── Initialization ───────────────────────────────────────────────────────
+
     function init() {
         canvas = document.getElementById('wfgCanvas');
+        tooltipEl = document.getElementById('graphHoverTooltip');
         if (canvas) {
             ctx = canvas.getContext('2d');
             resizeCanvas();
@@ -39,13 +140,21 @@ const DeadlockGraph = (() => {
                 layoutGraphNodes();
                 drawGraph();
             });
+            canvas.addEventListener('mousemove', handleCanvasMouseMove);
+            canvas.addEventListener('mouseleave', () => {
+                if (hoveredNodeId !== null) {
+                    hoveredNodeId = null;
+                    hideTooltip();
+                    drawGraph();
+                }
+            });
         }
 
-        // View mode toggle (RAG vs WFG)
-        const btnToggleMode = document.getElementById('btnToggleGraphView');
-        if (btnToggleMode) {
-            btnToggleMode.addEventListener('click', toggleViewMode);
-        }
+        // Segmented RAG / WFG mode buttons
+        const btnRag = document.getElementById('btnViewRag');
+        const btnWfg = document.getElementById('btnViewWfg');
+        if (btnRag) btnRag.addEventListener('click', () => setViewMode('rag'));
+        if (btnWfg) btnWfg.addEventListener('click', () => setViewMode('wfg'));
 
         // Live Workload Selector & Actions
         const liveSelect = document.getElementById('liveRunSelect');
@@ -62,8 +171,7 @@ const DeadlockGraph = (() => {
                     renderEmptyLiveState();
                     return;
                 }
-                const isHist = historicalRuns.some(r => r.run_id === chosen);
-                inspectingHistory = isHist;
+                inspectingHistory = historicalRuns.some(r => r.run_id === chosen);
                 selectedRunId = chosen;
                 lastRenderedRunId = null;
                 lastRenderedVersion = -1;
@@ -87,45 +195,60 @@ const DeadlockGraph = (() => {
             });
         }
 
-        if (btnApprove) {
-            btnApprove.addEventListener('click', approveLiveRecovery);
-        }
-        if (btnAbort) {
-            btnAbort.addEventListener('click', abortLiveRun);
-        }
+        if (btnApprove) btnApprove.addEventListener('click', approveLiveRecovery);
+        if (btnAbort) btnAbort.addEventListener('click', abortLiveRun);
 
-        // Isolated Offline Practice Section Controls (never touch live monitor or live canvas)
+        // Isolated Offline Practice Section Controls
         const btnPracticeWfg = document.getElementById('btnLoadPracticeWfg');
         const btnPracticeSafe = document.getElementById('btnPracticeBankerSafe');
         const btnPracticeUnsafe = document.getElementById('btnPracticeBankerUnsafe');
+        if (btnPracticeWfg) btnPracticeWfg.addEventListener('click', loadPracticeWfgScenario);
+        if (btnPracticeSafe) btnPracticeSafe.addEventListener('click', () => loadPracticeBankerScenario('safe'));
+        if (btnPracticeUnsafe) btnPracticeUnsafe.addEventListener('click', () => loadPracticeBankerScenario('unsafe'));
 
-        if (btnPracticeWfg) {
-            btnPracticeWfg.addEventListener('click', loadPracticeWfgScenario);
-        }
-        if (btnPracticeSafe) {
-            btnPracticeSafe.addEventListener('click', () => loadPracticeBankerScenario('safe'));
-        }
-        if (btnPracticeUnsafe) {
-            btnPracticeUnsafe.addEventListener('click', () => loadPracticeBankerScenario('unsafe'));
-        }
-
-        // Initialize cleanly in empty live state (NO dummy circular_wait or static Banker's)
+        updateViewModeChrome();
         renderEmptyLiveState();
         fetchLiveRunsInitial();
     }
 
-    function toggleViewMode() {
-        currentViewMode = currentViewMode === 'rag' ? 'wfg' : 'rag';
-        const btn = document.getElementById('btnToggleGraphView');
-        if (btn) {
-            btn.textContent = currentViewMode === 'rag' ? 'Mode: RAG (P + R)' : 'Mode: WFG (P only)';
-            btn.title = currentViewMode === 'rag'
-                ? 'Showing Resource Allocation Graph (Processes + Resources)'
-                : 'Showing Wait-For Graph (Direct Process Dependencies)';
-        }
+    function setViewMode(mode) {
+        if (mode !== 'rag' && mode !== 'wfg') return;
+        currentViewMode = mode;
+        hoveredNodeId = null;
+        hideTooltip();
+        updateViewModeChrome();
         resizeCanvas();
         layoutGraphNodes();
         drawGraph();
+    }
+
+    function toggleViewMode() {
+        setViewMode(currentViewMode === 'rag' ? 'wfg' : 'rag');
+    }
+
+    function updateViewModeChrome() {
+        const btnRag = document.getElementById('btnViewRag');
+        const btnWfg = document.getElementById('btnViewWfg');
+        const helper = document.getElementById('graphModeHelper');
+        const resLegend = document.getElementById('legendResourceItem');
+        const solidLegend = document.getElementById('legendSolidArrow');
+        const dashedLegend = document.getElementById('legendDashedArrow');
+
+        if (btnRag) btnRag.classList.toggle('active', currentViewMode === 'rag');
+        if (btnWfg) btnWfg.classList.toggle('active', currentViewMode === 'wfg');
+
+        if (helper) {
+            helper.textContent = currentViewMode === 'rag'
+                ? 'RAG view: solid arrows show which process holds a lock; dashed arrows show which lock it is waiting for. Hover any node for details.'
+                : 'WFG view: each arrow shows Process A waiting directly on Process B (labeled with the contended lock). Hover any node for details.';
+        }
+        if (resLegend) resLegend.style.display = currentViewMode === 'rag' ? 'flex' : 'none';
+        if (dashedLegend) dashedLegend.style.display = currentViewMode === 'rag' ? 'flex' : 'none';
+        if (solidLegend) {
+            solidLegend.innerHTML = currentViewMode === 'rag'
+                ? '<span class="graph-legend-line"></span> Holds Lock'
+                : '<span class="graph-legend-line"></span> Waits On Process';
+        }
     }
 
     function isTabVisible() {
@@ -141,12 +264,8 @@ const DeadlockGraph = (() => {
             resizeCanvas();
             layoutGraphNodes();
             drawGraph();
-            if (currentResult && currentResult.has_deadlock) {
-                startAnimationLoop();
-            }
+            if (currentResult && currentResult.has_deadlock) startAnimationLoop();
         });
-
-        // One-shot refresh on tab activation; ongoing updates arrive via WebSocket push
         fetchLiveRunsInitial();
         if (!watchdogTickTimer) {
             watchdogTickTimer = setInterval(updateWatchdogCountdownUI, 500);
@@ -155,30 +274,26 @@ const DeadlockGraph = (() => {
 
     function onTabDeactivated() {
         stopAnimationLoop();
+        hideTooltip();
         if (watchdogTickTimer) {
             clearInterval(watchdogTickTimer);
             watchdogTickTimer = null;
         }
     }
 
-    // ── Real-Time WebSocket Ingestion (Authoritative & Version-Checked) ──────
+    // ── Real-Time WebSocket Ingestion ────────────────────────────────────────
 
     function handleLiveSnapshotPush(msg) {
         if (!msg) return;
-        if (msg.live_deadlock) {
-            syncRunLists(msg.live_deadlock);
-        }
+        if (msg.live_deadlock) syncRunLists(msg.live_deadlock);
         const snap = msg.snapshot;
         if (!snap) return;
 
-        // Automatically switch to a newly registered active run
         if (snap.is_active_run && (!selectedRunId || inspectingHistory || !activeRuns.some(r => r.run_id === selectedRunId))) {
             inspectingHistory = false;
             selectedRunId = snap.run_id;
             renderLiveRunSelector();
         }
-
-        // Apply authoritative snapshot if it matches the selected run
         if (snap.run_id === selectedRunId) {
             applyAuthoritativeSnapshot(snap);
         }
@@ -189,25 +304,17 @@ const DeadlockGraph = (() => {
         const prevDeadlocked = new Set(activeRuns.filter(r => r.has_deadlock).map(r => r.run_id));
         syncRunLists(liveSummary);
 
-        // Notify once when a live run enters deadlock
         for (const r of activeRuns) {
             if (r.has_deadlock && !prevDeadlocked.has(r.run_id)) {
-                App.showToast(`Live Deadlock Detected: ${r.workload_name} (${r.run_id})`, 'error');
+                App.showToast(`Deadlock detected in ${r.workload_name} — open Deadlock tab to resolve.`, 'error');
             }
         }
 
-        // If user is NOT explicitly inspecting history, follow active runs automatically
         if (!inspectingHistory) {
             if (activeRuns.length === 0) {
-                // If previously selected run just transitioned to resolved/completed/aborted, keep showing its final outcome
-                // ONLY if it's the run we were actively watching and it completed/resolved cleanly; if aborted or none selected, clear live state.
                 if (selectedRunId) {
                     const justEnded = historicalRuns.find(r => r.run_id === selectedRunId);
-                    if (justEnded && (justEnded.status === 'aborted' || justEnded.status === 'timed_out')) {
-                        fetchLiveRunDetail(selectedRunId);
-                        return;
-                    }
-                    if (justEnded && justEnded.status === 'completed') {
+                    if (justEnded) {
                         fetchLiveRunDetail(selectedRunId);
                         return;
                     }
@@ -235,7 +342,6 @@ const DeadlockGraph = (() => {
         activeRuns = summary.active_runs || allRuns.filter(r => r.is_active_run);
         historicalRuns = summary.historical_runs || allRuns.filter(r => !r.is_active_run);
 
-        // Auto-select any brand-new active run that just registered
         for (const r of activeRuns) {
             if (!knownActiveIds.has(r.run_id)) {
                 knownActiveIds.add(r.run_id);
@@ -243,7 +349,6 @@ const DeadlockGraph = (() => {
                 selectedRunId = r.run_id;
             }
         }
-
         renderLiveRunSelector();
     }
 
@@ -287,35 +392,27 @@ const DeadlockGraph = (() => {
         }
     }
 
-    // ── Single Authoritative Snapshot Renderer (Atomic WFG + Banker's Sync) ──
+    // ── Single Authoritative Snapshot Renderer ───────────────────────────────
 
     function applyAuthoritativeSnapshot(snap) {
         if (!snap || !snap.run_id) return;
-
-        // Monotonic snapshot_version guard: reject stale out-of-order updates
         const ver = Number(snap.snapshot_version || 0);
-        if (snap.run_id === lastRenderedRunId && ver < lastRenderedVersion) {
-            return;
-        }
+        if (snap.run_id === lastRenderedRunId && ver < lastRenderedVersion) return;
+
         lastRenderedRunId = snap.run_id;
         lastRenderedVersion = ver;
         currentLiveRun = snap;
 
         renderLiveRunMonitor(snap);
 
-        const isAbortedOrTimedOut = snap.status === 'aborted' || snap.status === 'timed_out';
-        if (isAbortedOrTimedOut) {
-            // Never display stale deadlocked graph or stale Banker matrices for aborted runs
+        if (snap.status === 'aborted' || snap.status === 'timed_out') {
             clearLiveGraphAndBanker(
-                snap.status === 'aborted'
-                    ? `RUN ABORTED (${snap.workload_name})`
-                    : `WATCHDOG EXPIRED (${snap.workload_name})`,
-                'Active deadlock nodes and Banker matrices have been cleared. Historical events remain available in the audit log above.'
+                snap.status === 'aborted' ? `${snap.workload_name} — Aborted` : `${snap.workload_name} — Timed Out`,
+                'The live graph and Banker table have been cleared. Past events remain in the Activity Feed above.'
             );
             return;
         }
 
-        // Render RAG/WFG and Live Banker's Algorithm strictly from THIS snapshot version
         renderLiveGraphFromSnapshot(snap);
         renderLiveBankerFromSnapshot(snap);
     }
@@ -337,12 +434,13 @@ const DeadlockGraph = (() => {
 
         clearLiveGraphAndBanker(
             'NO ACTIVE DEADLOCK WORKLOAD',
-            'Run one of the three Python scenario files from a separate VS Code terminal. Waiting for live workload registration...'
+            'Start any scenario file in a second terminal to see the live graph and Banker analysis.'
         );
     }
 
     function clearLiveGraphAndBanker(titleText, detailText) {
         stopAnimationLoop();
+        hideTooltip();
         currentGraph = { nodes: [], edges: [], rag_edges: [], wfg_edges: [] };
         currentResult = null;
         drawGraph();
@@ -351,10 +449,10 @@ const DeadlockGraph = (() => {
         if (overlay) {
             overlay.style.display = 'flex';
             overlay.innerHTML = `
-                <div style="font-weight: 700; font-size: 0.92rem; letter-spacing: 0.04em; color: var(--text-primary); margin-bottom: 6px;">
+                <div style="font-weight: 700; font-size: 0.92rem; letter-spacing: 0.03em; color: var(--text-primary); margin-bottom: 6px;">
                     ${escapeHtml(titleText)}
                 </div>
-                <div style="font-size: 0.82rem; color: var(--text-secondary); max-width: 380px;">
+                <div style="font-size: 0.82rem; color: var(--text-secondary); max-width: 360px; line-height: 1.45;">
                     ${escapeHtml(detailText)}
                 </div>
             `;
@@ -362,8 +460,8 @@ const DeadlockGraph = (() => {
 
         const wfgBadge = document.getElementById('wfgSnapshotBadge');
         const bkBadge = document.getElementById('bankerSnapshotBadge');
-        if (wfgBadge) wfgBadge.textContent = 'Snapshot --';
-        if (bkBadge) bkBadge.textContent = 'Snapshot --';
+        if (wfgBadge) wfgBadge.textContent = 'v--';
+        if (bkBadge) bkBadge.textContent = 'v--';
 
         const box = document.getElementById('wfgResultBox');
         const title = document.getElementById('wfgStatusTitle');
@@ -375,13 +473,13 @@ const DeadlockGraph = (() => {
         if (title) title.textContent = titleText;
         if (detail) detail.textContent = detailText;
 
-        const resList = document.getElementById('bankerResourcesList');
+        const availChips = document.getElementById('bankerAvailableChips');
         const tbody = document.getElementById('bankerTableBody');
         const availVec = document.getElementById('bankerAvailableVec');
         const safeSeq = document.getElementById('bankerSafeSeqInline');
         const bkBox = document.getElementById('bankerResultBox');
 
-        if (resList) resList.textContent = '--';
+        if (availChips) availChips.innerHTML = '<span class="dl-chip dl-chip-muted">--</span>';
         if (availVec) availVec.textContent = '--';
         if (safeSeq) safeSeq.textContent = '--';
         if (bkBox) bkBox.style.display = 'none';
@@ -389,7 +487,7 @@ const DeadlockGraph = (() => {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="5" style="text-align: center; color: var(--text-muted); padding: var(--space-md);">
-                        ${escapeHtml(titleText)} — ${escapeHtml(detailText)}
+                        ${escapeHtml(titleText)}
                     </td>
                 </tr>
             `;
@@ -401,32 +499,29 @@ const DeadlockGraph = (() => {
         if (!sel) return;
 
         if (activeRuns.length === 0 && historicalRuns.length === 0) {
-            sel.innerHTML = '<option value="">-- Waiting for Live Workload --</option>';
+            sel.innerHTML = '<option value="">Waiting for a live workload...</option>';
             return;
         }
 
         let html = '';
         if (activeRuns.length > 0) {
-            html += '<optgroup label="Active Live Workloads">';
+            html += '<optgroup label="Active Workloads">';
             for (const r of activeRuns) {
-                const stateLabel = r.status === 'deadlocked' ? 'DEADLOCKED (ACTIVE)' : 'ACTIVE';
-                const label = `${r.workload_name} — ${stateLabel} [${r.run_id}]`;
+                const tag = r.status === 'deadlocked' ? 'DEADLOCKED' : 'ACTIVE';
                 const selected = r.run_id === selectedRunId ? 'selected' : '';
-                html += `<option value="${escapeHtml(r.run_id)}" ${selected}>${escapeHtml(label)}</option>`;
+                html += `<option value="${escapeHtml(r.run_id)}" ${selected}>${escapeHtml(r.workload_name)} — ${tag}</option>`;
             }
             html += '</optgroup>';
         } else {
-            const noneSelected = !selectedRunId ? 'selected' : '';
-            html += `<option value="" ${noneSelected}>-- No Active Workload (Live Idle) --</option>`;
+            html += `<option value="" ${!selectedRunId ? 'selected' : ''}>No Active Workload</option>`;
         }
 
         if (historicalRuns.length > 0) {
-            html += '<optgroup label="Historical Runs (Read-Only)">';
+            html += '<optgroup label="Past Runs (Read-Only)">';
             for (const r of historicalRuns) {
-                const tag = r.selective_recovery_succeeded ? 'RESOLVED' : (r.status || 'ended').toUpperCase();
-                const label = `${r.workload_name} — ${tag} [${r.run_id}]`;
+                const tag = friendlyRunStatus(r.status, r.selective_recovery_succeeded).toUpperCase();
                 const selected = r.run_id === selectedRunId ? 'selected' : '';
-                html += `<option value="${escapeHtml(r.run_id)}" ${selected}>${escapeHtml(label)}</option>`;
+                html += `<option value="${escapeHtml(r.run_id)}" ${selected}>${escapeHtml(r.workload_name)} — ${tag}</option>`;
             }
             html += '</optgroup>';
         }
@@ -438,11 +533,11 @@ const DeadlockGraph = (() => {
         const el = document.getElementById('liveWatchdogCountdown');
         if (!el || !currentLiveRun) return;
         if (!currentLiveRun.is_active_run) {
-            el.textContent = currentLiveRun.status === 'timed_out' ? 'EXPIRED (0.0s)' : 'STOPPED';
+            el.textContent = currentLiveRun.status === 'timed_out' ? 'Expired' : 'Stopped';
             return;
         }
         const remaining = Math.max(0, (currentLiveRun.watchdog_deadline || 0) - (Date.now() / 1000));
-        el.textContent = `${remaining.toFixed(1)}s / ${currentLiveRun.max_runtime_seconds}s`;
+        el.textContent = `${Math.ceil(remaining)}s left`;
     }
 
     function renderLiveRunMonitor(run) {
@@ -457,58 +552,70 @@ const DeadlockGraph = (() => {
         if (histBanner) {
             if (!run.is_active_run) {
                 histBanner.style.display = 'block';
-                histBanner.innerHTML = `<strong>Historical Run (${escapeHtml(run.status.toUpperCase())}):</strong> Viewing preserved run <code>${escapeHtml(run.run_id)}</code> (${escapeHtml(run.workload_name)}). Live recovery controls are disabled.`;
+                histBanner.innerHTML = `Viewing past run <strong>${escapeHtml(run.workload_name)}</strong> (${escapeHtml(friendlyRunStatus(run.status, run.selective_recovery_succeeded))}). Live recovery actions are disabled.`;
             } else {
                 histBanner.style.display = 'none';
             }
         }
-        if (btnRet) {
-            btnRet.style.display = (!run.is_active_run || inspectingHistory) ? 'inline-flex' : 'none';
-        }
+        if (btnRet) btnRet.style.display = (!run.is_active_run || inspectingHistory) ? 'inline-flex' : 'none';
 
         const scenEl = document.getElementById('liveRunScenarioName');
         const statusBadge = document.getElementById('liveRunStatusBadge');
         const sbName = document.getElementById('liveRunSandboxName');
         const supInfo = document.getElementById('liveRunSupervisorInfo');
+        const workersCount = document.getElementById('liveRunWorkersCount');
         const limInfo = document.getElementById('liveRunLimitsInfo');
         const verBadge = document.getElementById('liveSnapshotVersionBadge');
 
-        if (scenEl) scenEl.textContent = run.workload_name || '--';
-        if (verBadge) verBadge.textContent = `Snapshot v${run.snapshot_version}`;
+        if (scenEl) scenEl.textContent = run.workload_name || 'Live Workload';
+        if (verBadge) verBadge.textContent = `Run ${run.run_id.slice(0, 6)} · Synced v${run.snapshot_version}`;
         if (statusBadge) {
-            const st = (run.status || 'unknown').toUpperCase();
-            statusBadge.textContent = st;
-            statusBadge.className = `priority-badge ${run.status === 'deadlocked' || run.status === 'timed_out' || run.status === 'aborted' ? 'high' : (run.status === 'resolved' || run.status === 'completed' ? 'normal' : 'idle')}`;
+            const label = friendlyRunStatus(run.status, run.selective_recovery_succeeded);
+            statusBadge.textContent = label;
+            statusBadge.className = `priority-badge ${
+                run.status === 'deadlocked' || run.status === 'timed_out' || run.status === 'aborted'
+                    ? 'high'
+                    : (run.status === 'resolved' || run.status === 'completed' || run.status === 'running' ? 'normal' : 'idle')
+            }`;
         }
+
+        const vl = run.sandbox.verified_limits || {};
         if (sbName) {
-            sbName.textContent = `${run.sandbox.sandbox_name} (${run.sandbox.is_active ? 'ACTIVE' : 'CLEANED UP'})`;
-        }
-        if (supInfo) {
-            supInfo.textContent = `PID ${run.supervisor.pid} (${run.supervisor.alive ? 'ALIVE' : 'EXITED'})`;
+            sbName.innerHTML = run.sandbox.is_active
+                ? `Active <span class="dl-chip dl-chip-avail">${vl.verified ? 'Verified' : 'Unverified'}</span>`
+                : 'Cleaned Up';
         }
         if (limInfo) {
-            const vl = run.sandbox.verified_limits || {};
-            limInfo.textContent = `CPU ${vl.cpu_rate_percent ?? '--'}% | JobRAM ${vl.job_memory_limit_mb ?? '--'}MB | ProcRAM ${vl.process_memory_limit_mb ?? '--'}MB | MaxProcs ${vl.active_process_limit ?? '--'} | Verified: ${vl.verified ? 'YES' : 'NO'}`;
+            limInfo.textContent = `CPU ${vl.cpu_rate_percent ?? '--'}% · RAM ${vl.job_memory_limit_mb ?? '--'} MB · Max ${vl.active_process_limit ?? '--'} procs`;
+        }
+        if (supInfo) {
+            supInfo.innerHTML = `PID ${run.supervisor.pid} <span class="dl-chip ${run.supervisor.alive ? 'dl-chip-avail' : 'dl-chip-muted'}">${run.supervisor.alive ? 'Running' : 'Exited'}</span>`;
+        }
+        if (workersCount) {
+            const aliveWorkers = (run.workers || []).filter(w => w.alive).length;
+            workersCount.textContent = `${aliveWorkers} of ${run.expected_workers} workers active`;
         }
         updateWatchdogCountdownUI();
 
-        // Explicit User-Approved Selective Recovery Box (STRICTLY active runs only)
+        // Actionable Recovery Callout (Plain English)
         const recBox = document.getElementById('liveRecoveryBox');
         const recDetail = document.getElementById('liveRecoveryDetail');
+        const btnApprove = document.getElementById('btnApproveLiveRecovery');
         const dl = run.deadlock_detection || {};
         const victim = dl.recommended_victim_details;
 
         if (recBox) {
             if (run.is_active_run && dl.has_deadlock && victim) {
                 recBox.style.display = 'block';
-                const holds = Object.entries(victim.allocated || {}).filter(([, v]) => v > 0).map(([k]) => k).join(', ') || 'None';
-                const waits = Object.entries(victim.requesting || {}).filter(([, v]) => v > 0).map(([k]) => k).join(', ') || 'None';
+                const holdsList = Object.entries(victim.allocated || {}).filter(([, v]) => v > 0).map(([k]) => cleanName(k));
+                const holdsText = holdsList.length ? holdsList.join(', ') : 'its locks';
+                const victimName = cleanName(victim.name);
+
+                if (btnApprove) btnApprove.textContent = `Stop ${victimName} (Recommended)`;
                 if (recDetail) {
                     recDetail.innerHTML = `
-                        <strong>Recommended Victim:</strong> ${escapeHtml(victim.name)} (OS PID <code>${victim.pid}</code>, TID <code>${victim.tid}</code>) &bull;
-                        <strong>App Recovery Priority:</strong> <code>${victim.recovery_priority}</code> (1 = lowest; OS sched: <code>${escapeHtml(victim.os_scheduling_priority)}</code>) &bull;
-                        <strong>Holds:</strong> ${escapeHtml(holds)} &bull; <strong>Waits For:</strong> ${escapeHtml(waits)}
-                        <br><span style="font-size: 0.76rem; color: var(--text-secondary);">Approving terminates ONLY PID ${victim.pid} via TerminateProcess; Job Object '${escapeHtml(run.sandbox.sandbox_name)}' and Supervisor PID ${run.supervisor.pid} remain active.</span>
+                        Recommended to stop <strong>${escapeHtml(victimName)}</strong> (PID ${victim.pid}, Priority ${victim.recovery_priority} — lowest in the deadlock cycle).
+                        Stopping only this worker frees <strong>${escapeHtml(holdsText)}</strong> so the remaining workers can finish while the supervisor stays running.
                     `;
                 }
             } else {
@@ -523,70 +630,76 @@ const DeadlockGraph = (() => {
                 outcomeBox.style.display = 'block';
                 outcomeBox.style.background = 'var(--status-danger-bg)';
                 outcomeBox.style.border = '1px solid var(--status-danger)';
-                outcomeBox.innerHTML = `<strong style="color: var(--status-danger-text);">WATCHDOG EMERGENCY CLEANUP (NOT SELECTIVE RECOVERY):</strong> Maximum runtime (${run.max_runtime_seconds}s) expired. Whole-job <code>TerminateJobObject</code> executed.`;
+                outcomeBox.innerHTML = `<strong style="color: var(--status-danger-text);">Time Limit Reached:</strong> The ${run.max_runtime_seconds}s safety timer expired and closed the entire sandbox (emergency cleanup, not selective recovery).`;
             } else if (run.status === 'aborted') {
                 outcomeBox.style.display = 'block';
                 outcomeBox.style.background = 'var(--bg-surface-alt)';
                 outcomeBox.style.border = '1px solid var(--border-default)';
-                outcomeBox.innerHTML = `<strong style="color: var(--status-danger-text);">ABORTED:</strong> Run was torn down and its live graph cleared. Historical audit events are preserved below.`;
+                outcomeBox.innerHTML = `<strong style="color: var(--status-danger-text);">Workload Aborted:</strong> All sandbox processes were stopped and the live graph has been cleared.`;
             } else if (run.selective_recovery_succeeded) {
                 outcomeBox.style.display = 'block';
                 outcomeBox.style.background = 'var(--status-success-bg)';
                 outcomeBox.style.border = '1px solid var(--status-success)';
-                outcomeBox.innerHTML = `<strong style="color: var(--status-success-text);">DEADLOCK RESOLVED (SELECTIVE RECOVERY VERIFIED):</strong> Approved victim terminated via <code>TerminateProcess</code>; OS <code>WAIT_ABANDONED</code> reconciled; remaining workers progressed and completed.`;
+                outcomeBox.innerHTML = `<strong style="color: var(--status-success-text);">Deadlock Resolved:</strong> Only the approved worker was stopped. Surviving workers recovered the abandoned lock, verified shared data, and completed cleanly.`;
             } else {
                 outcomeBox.style.display = 'none';
             }
         }
 
-        // Workers Table (do not display deadlocked rows for aborted runs)
+        // Clean Workers Table
         const wBody = document.getElementById('liveWorkersTableBody');
         if (wBody) {
             const workers = run.workers || [];
             if (run.status === 'aborted' || run.status === 'timed_out') {
-                wBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Run ${escapeHtml(run.status.toUpperCase())} — active worker rows cleared (see preserved audit log).</td></tr>`;
+                wBody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 14px;">Workload ${escapeHtml(friendlyRunStatus(run.status, false).toLowerCase())} — active worker rows cleared.</td></tr>`;
             } else if (workers.length === 0) {
-                wBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Waiting for child worker processes to register...</td></tr>';
+                wBody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 14px;">Waiting for worker processes to start...</td></tr>';
             } else {
+                const minPri = Math.min(...workers.map(w => w.recovery_priority));
                 wBody.innerHTML = workers.map(w => {
-                    const holds = Object.entries(w.allocated || {}).filter(([, v]) => v > 0).map(([k]) => k).join(', ') || '-';
-                    const waits = Object.entries(w.requesting || {}).filter(([, v]) => v > 0).map(([k]) => k).join(', ') || '-';
+                    const holds = Object.entries(w.allocated || {}).filter(([, v]) => v > 0).map(([k]) => `<span class="dl-chip dl-chip-hold">${escapeHtml(cleanName(k))}</span>`).join(' ') || '<span style="color:var(--text-muted);">None</span>';
+                    const waits = Object.entries(w.requesting || {}).filter(([, v]) => v > 0).map(([k]) => `<span class="dl-chip dl-chip-wait">${escapeHtml(cleanName(k))}</span>`).join(' ') || '<span style="color:var(--text-muted);">None</span>';
+                    const st = friendlyWorkerState(w.state);
+                    const priNote = w.recovery_priority === minPri ? ' <span style="font-size:0.7rem;color:var(--text-muted);">(lowest)</span>' : '';
                     return `
                         <tr>
-                            <td style="font-weight: 700;">${escapeHtml(w.name)}</td>
-                            <td class="pid-cell">${w.pid} / ${w.tid}</td>
-                            <td><strong>RecPri ${w.recovery_priority}</strong> <span style="font-size:0.72rem;color:var(--text-secondary);">(OS: ${escapeHtml(w.os_scheduling_priority)})</span></td>
-                            <td>${w.in_job_verified ? '<span style="color:var(--status-success-text);font-weight:600;">YES</span>' : 'NO'}</td>
-                            <td style="font-family:var(--font-mono);font-size:0.75rem;">H: ${escapeHtml(holds)} | W: ${escapeHtml(waits)}</td>
-                            <td><span class="priority-badge ${w.state === 'deadlocked' || w.state === 'terminated_victim' ? 'high' : 'normal'}">${escapeHtml(w.state.toUpperCase())}</span></td>
+                            <td>
+                                <div style="font-weight: 700; color: var(--text-primary);">${escapeHtml(cleanName(w.name))}</div>
+                                <div style="font-size: 0.72rem; font-family: var(--font-mono); color: var(--text-muted);">PID ${w.pid}</div>
+                            </td>
+                            <td><strong>${w.recovery_priority}</strong>${priNote}</td>
+                            <td>${holds}</td>
+                            <td>${waits}</td>
+                            <td><span class="priority-badge ${st.cls}">${escapeHtml(st.label)}</span></td>
                         </tr>
                     `;
                 }).join('');
             }
         }
 
-        // Audit Log
+        // Clean Human-Readable Activity Feed
         const logEl = document.getElementById('liveEventLog');
         if (logEl) {
-            const evts = (run.events || []).slice().reverse();
+            const evts = (run.events || []).slice(-30).reverse();
             logEl.innerHTML = evts.map(ev => {
-                const ts = new Date(ev.timestamp * 1000).toLocaleTimeString();
-                const isAbandoned = ev.event_type === 'abandoned_acquired' || ev.event_type === 'mutex_abandoned';
-                const color = isAbandoned
-                    ? 'var(--status-warning-text)'
-                    : (ev.event_type === 'watchdog_expired' || ev.event_type === 'victim_terminated' || ev.event_type === 'run_aborted'
-                        ? 'var(--status-danger-text)'
-                        : 'var(--text-primary)');
-                return `<div style="margin-bottom: 4px; color: ${color};">[${ts}] <strong>${escapeHtml(ev.event_type)}</strong> (${escapeHtml(ev.actor)}): ${escapeHtml(ev.details)}</div>`;
+                const ts = new Date(ev.timestamp * 1000).toLocaleTimeString([], { hour12: false });
+                const fmt = formatAuditEvent(ev);
+                return `
+                    <div class="dl-feed-item">
+                        <span class="dl-feed-time">${ts}</span>
+                        <span class="dl-feed-tag ${fmt.cls}">${escapeHtml(fmt.tag)}</span>
+                        <span style="color: var(--text-primary);">${escapeHtml(fmt.text)}</span>
+                    </div>
+                `;
             }).join('');
         }
     }
 
-    // ── Live RAG / WFG Canvas Rendering ──────────────────────────────────────
+    // ── Refined RAG / WFG Canvas Visualizer ──────────────────────────────────
 
     function renderLiveGraphFromSnapshot(snap) {
         const wfgBadge = document.getElementById('wfgSnapshotBadge');
-        if (wfgBadge) wfgBadge.textContent = `Snapshot v${snap.snapshot_version}`;
+        if (wfgBadge) wfgBadge.textContent = `v${snap.snapshot_version}`;
 
         const graph = snap.graph || { nodes: [], edges: [], rag_edges: [], wfg_edges: [] };
         const dl = snap.deadlock_detection || null;
@@ -600,11 +713,11 @@ const DeadlockGraph = (() => {
             if (!hasNodes) {
                 overlay.style.display = 'flex';
                 overlay.innerHTML = `
-                    <div style="font-weight: 700; font-size: 0.9rem; color: var(--text-primary); margin-bottom: 6px;">
-                        ${snap.status === 'completed' || snap.status === 'resolved' ? 'WORKLOAD COMPLETED — ALL RESOURCES RELEASED' : 'INITIALIZING LIVE WORKLOAD'}
+                    <div style="font-weight: 700; font-size: 0.92rem; color: var(--status-success-text); margin-bottom: 6px;">
+                        ${snap.status === 'completed' || snap.status === 'resolved' ? 'All Locks Released — Workload Complete' : 'Starting Workload...'}
                     </div>
-                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
-                        ${escapeHtml(snap.workload_name)} (Snapshot v${snap.snapshot_version})
+                    <div style="font-size: 0.82rem; color: var(--text-secondary);">
+                        ${escapeHtml(snap.workload_name)}
                     </div>
                 `;
             } else {
@@ -632,30 +745,28 @@ const DeadlockGraph = (() => {
             const rect = parent.getBoundingClientRect();
             w = Math.floor(rect.width || parent.clientWidth || parent.offsetWidth || 0);
         }
-        if (!w || w < 200) {
+        if (!w || w < 220) {
             const panel = document.getElementById('panelDeadlock');
             const main = document.querySelector('.main-content') || document.body;
-            w = Math.floor(panel?.clientWidth || (main ? (main.clientWidth - 80) : 0) || 640);
+            w = Math.floor(panel?.clientWidth || (main ? (main.clientWidth - 80) : 0) || 620);
         }
 
         const dpr = window.devicePixelRatio || 1;
         const parentWidth = parent ? (parent.clientWidth || w) : w;
-        const cssWidth = Math.min(Math.max(280, w), parentWidth || 600);
-        const cssHeight = 360;
+        const cssWidth = Math.min(Math.max(300, w), parentWidth || 620);
+        const cssHeight = 420;
 
         canvas.style.width = `${cssWidth}px`;
         canvas.style.height = `${cssHeight}px`;
         canvas.width = Math.floor(cssWidth * dpr);
         canvas.height = Math.floor(cssHeight * dpr);
 
-        if (ctx) {
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        }
+        if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
     function getCssDimensions() {
-        const cssWidth = canvas && canvas.style.width ? parseFloat(canvas.style.width) : (canvas ? canvas.width : 600);
-        const cssHeight = canvas && canvas.style.height ? parseFloat(canvas.style.height) : (canvas ? canvas.height : 360);
+        const cssWidth = canvas && canvas.style.width ? parseFloat(canvas.style.width) : (canvas ? canvas.width : 620);
+        const cssHeight = canvas && canvas.style.height ? parseFloat(canvas.style.height) : (canvas ? canvas.height : 420);
         return { w: cssWidth, h: cssHeight };
     }
 
@@ -667,7 +778,7 @@ const DeadlockGraph = (() => {
                 animFrameId = null;
                 return;
             }
-            pulsePhase = (pulsePhase + 0.04) % (Math.PI * 2);
+            pulsePhase = (pulsePhase + 0.045) % (Math.PI * 2);
             drawGraph();
             animFrameId = requestAnimationFrame(loop);
         }
@@ -683,78 +794,277 @@ const DeadlockGraph = (() => {
 
     function getActiveNodes() {
         if (!currentGraph || !currentGraph.nodes) return [];
-        if (currentViewMode === 'wfg') {
-            return currentGraph.nodes.filter(n => n.type === 'process');
-        }
-        return currentGraph.nodes;
+        return currentViewMode === 'wfg'
+            ? currentGraph.nodes.filter(n => n.type === 'process')
+            : currentGraph.nodes;
     }
 
     function getActiveEdges() {
         if (!currentGraph) return [];
-        if (currentViewMode === 'wfg') {
-            return currentGraph.wfg_edges || [];
-        }
-        return currentGraph.rag_edges || currentGraph.edges || [];
+        return currentViewMode === 'wfg'
+            ? (currentGraph.wfg_edges || [])
+            : (currentGraph.rag_edges || currentGraph.edges || []);
     }
 
+    function getNodeMetrics(nodeCount) {
+        const compact = nodeCount >= 8;
+        return {
+            procRadius: compact ? 28 : 34,
+            resW: compact ? 80 : 94,
+            resH: compact ? 38 : 44,
+        };
+    }
+
+    /**
+     * Smart topology-aware graph layout:
+     *   - 2-process WFG: crisp horizontal pair (curved opposing arrows above & below)
+     *   - 2-process + 2-resource RAG: textbook clockwise diamond
+     *   - Cycle + branch (e.g. Multi-Resource A->B->C->A + D->B): places main cycle in a clean
+     *     ring on the left and non-cycle blocked nodes cleanly on the right (zero crossing edges)
+     *   - Ring topologies (e.g. Dining Philosophers 5+5): traces edges in true cycle order so
+     *     every arrow follows the perimeter with zero crossings
+     */
     function layoutGraphNodes() {
         if (!canvas || !currentGraph || !currentGraph.nodes) return;
         const { w, h } = getCssDimensions();
-        const centerX = w / 2;
-        const centerY = h / 2;
-        const radius = Math.min(centerX, centerY) * 0.72;
-
         const nodes = getActiveNodes();
-        const count = nodes.length;
-        if (count === 0) return;
+        if (nodes.length === 0) return;
 
         const procs = nodes.filter(n => n.type === 'process');
         const res = nodes.filter(n => n.type === 'resource');
+        const nodeMap = new Map(nodes.map(n => [n.id, n]));
+        const involvedProcs = new Set(currentResult?.involved_processes || []);
+        const involvedRes = new Set(currentResult?.involved_resources || []);
 
-        if (currentViewMode === 'rag' && procs.length > 0 && res.length > 0 && procs.length === res.length) {
-            const ordered = [];
-            for (let i = 0; i < procs.length; i++) {
-                ordered.push(procs[i]);
-                ordered.push(res[i]);
+        // 1. WFG Layout
+        if (currentViewMode === 'wfg') {
+            if (procs.length === 2) {
+                const spread = Math.min(130, w * 0.25);
+                procs[0].x = w / 2 - spread;
+                procs[0].y = h / 2;
+                procs[1].x = w / 2 + spread;
+                procs[1].y = h / 2;
+                return;
             }
-            for (let i = 0; i < ordered.length; i++) {
-                const angle = (i / ordered.length) * (Math.PI * 2) - Math.PI / 2;
-                ordered[i].x = centerX + Math.cos(angle) * radius;
-                ordered[i].y = centerY + Math.sin(angle) * radius;
+
+            const cycleProcs = procs.filter(p => involvedProcs.has(p.id));
+            const branchProcs = procs.filter(p => !involvedProcs.has(p.id));
+
+            // Order cycle processes along actual DFS cycle if available
+            const orderedCycle = orderByCycle(cycleProcs, currentResult?.cycles?.[0]);
+
+            if (orderedCycle.length >= 2 && branchProcs.length > 0) {
+                const cx = w * 0.37;
+                const cy = h * 0.5;
+                const r = Math.min(w * 0.23, h * 0.34);
+                for (let i = 0; i < orderedCycle.length; i++) {
+                    const angle = (i / orderedCycle.length) * Math.PI * 2 - Math.PI / 2;
+                    orderedCycle[i].x = cx + Math.cos(angle) * r;
+                    orderedCycle[i].y = cy + Math.sin(angle) * r;
+                }
+                const bx = w * 0.80;
+                for (let i = 0; i < branchProcs.length; i++) {
+                    branchProcs[i].x = bx;
+                    branchProcs[i].y = branchProcs.length === 1
+                        ? cy
+                        : (h * 0.26 + (i / (branchProcs.length - 1)) * h * 0.48);
+                }
+                return;
             }
-        } else {
-            for (let i = 0; i < count; i++) {
-                const angle = (i / count) * (Math.PI * 2) - Math.PI / 2;
-                nodes[i].x = centerX + Math.cos(angle) * radius;
-                nodes[i].y = centerY + Math.sin(angle) * radius;
+
+            // Regular polygon in cycle order
+            const orderedAll = orderedCycle.length === procs.length ? orderedCycle : procs;
+            const r = Math.min(w * 0.33, h * 0.35);
+            for (let i = 0; i < orderedAll.length; i++) {
+                const angle = (i / orderedAll.length) * Math.PI * 2 - Math.PI / 2;
+                orderedAll[i].x = w / 2 + Math.cos(angle) * r;
+                orderedAll[i].y = h / 2 + Math.sin(angle) * r;
+            }
+            return;
+        }
+
+        // 2. RAG Layout
+        // Special textbook diamond for 2 processes + 2 resources (Circular Deadlock)
+        if (procs.length === 2 && res.length === 2) {
+            const dx = Math.min(165, w * 0.29);
+            const dy = Math.min(125, h * 0.31);
+            // Place P0 Left, P1 Right; place resource held by P0 at Top and resource held by P1 at Bottom
+            const p0 = procs[0];
+            const p1 = procs[1];
+            const heldByP0 = Object.keys(p0.allocated || {}).find(k => (p0.allocated[k] || 0) > 0);
+            const rTop = (heldByP0 && nodeMap.get(heldByP0)) || res[0];
+            const rBot = res.find(r => r.id !== rTop.id) || res[1];
+
+            p0.x = w / 2 - dx; p0.y = h / 2;
+            p1.x = w / 2 + dx; p1.y = h / 2;
+            rTop.x = w / 2;    rTop.y = h / 2 - dy;
+            rBot.x = w / 2;    rBot.y = h / 2 + dy;
+            return;
+        }
+
+        // Cycle + Branch RAG (e.g. Multi-Resource Deadlock: 3 cycle procs + 3 cycle locks + Worker D + GPU Lock)
+        const cycleProcs = procs.filter(p => involvedProcs.has(p.id));
+        const branchProcs = procs.filter(p => !involvedProcs.has(p.id));
+
+        if (cycleProcs.length >= 2 && branchProcs.length > 0) {
+            const orderedCycleP = orderByCycle(cycleProcs, currentResult?.cycles?.[0]);
+            const placedRes = new Set();
+            const ringNodes = [];
+
+            for (const p of orderedCycleP) {
+                const heldId = Object.keys(p.allocated || {}).find(k => (p.allocated[k] || 0) > 0 && nodeMap.has(k) && !placedRes.has(k));
+                if (heldId) {
+                    ringNodes.push(nodeMap.get(heldId));
+                    placedRes.add(heldId);
+                }
+                ringNodes.push(p);
+            }
+            // Add any remaining involved resources not yet placed
+            for (const r of res) {
+                if (involvedRes.has(r.id) && !placedRes.has(r.id)) {
+                    ringNodes.push(r);
+                    placedRes.add(r.id);
+                }
+            }
+
+            const cx = w * 0.35;
+            const cy = h * 0.50;
+            const rx = Math.min(w * 0.25, 165);
+            const ry = Math.min(h * 0.37, 150);
+            for (let i = 0; i < ringNodes.length; i++) {
+                const angle = (i / ringNodes.length) * Math.PI * 2 - Math.PI / 2;
+                ringNodes[i].x = cx + Math.cos(angle) * rx;
+                ringNodes[i].y = cy + Math.sin(angle) * ry;
+            }
+
+            // Place non-cycle processes & their private locks neatly on the right column
+            const bx = w * 0.81;
+            const branchRes = res.filter(r => !placedRes.has(r.id));
+            for (let i = 0; i < branchProcs.length; i++) {
+                const bp = branchProcs[i];
+                bp.x = bx;
+                bp.y = branchRes.length > 0 ? h * 0.36 : h * 0.50;
+                const heldPrivate = Object.keys(bp.allocated || {}).find(k => (bp.allocated[k] || 0) > 0 && !placedRes.has(k) && nodeMap.has(k));
+                if (heldPrivate) {
+                    const pr = nodeMap.get(heldPrivate);
+                    pr.x = bx;
+                    pr.y = h * 0.68;
+                    placedRes.add(heldPrivate);
+                }
+            }
+            // Fallback for any remaining unplaced resource
+            let extraY = h * 0.84;
+            for (const r of res) {
+                if (!placedRes.has(r.id)) {
+                    r.x = bx;
+                    r.y = extraY;
+                    extraY -= 48;
+                }
+            }
+            return;
+        }
+
+        // General N-process / N-resource ring (e.g. Dining Philosophers): trace perimeter in true cycle order!
+        const orderedProcs = orderByCycle(procs, currentResult?.cycles?.[0]);
+        const placedRes = new Set();
+        const ring = [];
+        for (const p of orderedProcs) {
+            const heldId = Object.keys(p.allocated || {}).find(k => (p.allocated[k] || 0) > 0 && nodeMap.has(k) && !placedRes.has(k));
+            if (heldId) {
+                ring.push(nodeMap.get(heldId));
+                placedRes.add(heldId);
+            }
+            ring.push(p);
+        }
+        for (const r of res) {
+            if (!placedRes.has(r.id)) ring.push(r);
+        }
+
+        const rx = Math.min(w * 0.39, 235);
+        const ry = Math.min(h * 0.39, 162);
+        for (let i = 0; i < ring.length; i++) {
+            const angle = (i / ring.length) * Math.PI * 2 - Math.PI / 2;
+            ring[i].x = w / 2 + Math.cos(angle) * rx;
+            ring[i].y = h / 2 + Math.sin(angle) * ry;
+        }
+    }
+
+    function orderByCycle(procs, cycleArr) {
+        if (!cycleArr || cycleArr.length < 2) return procs;
+        const map = new Map(procs.map(p => [p.id, p]));
+        const seen = new Set();
+        const ordered = [];
+        for (const id of cycleArr) {
+            if (map.has(id) && !seen.has(id)) {
+                ordered.push(map.get(id));
+                seen.add(id);
             }
         }
+        for (const p of procs) {
+            if (!seen.has(p.id)) ordered.push(p);
+        }
+        return ordered;
+    }
+
+    function drawBackgroundGrid(w, h) {
+        ctx.save();
+        ctx.fillStyle = '#FFFBF5';
+        ctx.fillRect(0, 0, w, h);
+        ctx.fillStyle = '#E6DAC9';
+        const step = 22;
+        for (let x = step; x < w; x += step) {
+            for (let y = step; y < h; y += step) {
+                ctx.fillRect(x, y, 1.5, 1.5);
+            }
+        }
+        ctx.restore();
+    }
+
+    function clipToNodeBorder(node, targetX, targetY, metrics, margin) {
+        const dx = targetX - node.x;
+        const dy = targetY - node.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 1e-4) return { x: node.x, y: node.y };
+        const ux = dx / dist;
+        const uy = dy / dist;
+
+        if (node.type === 'process') {
+            const r = metrics.procRadius + margin;
+            return { x: node.x + ux * r, y: node.y + uy * r };
+        }
+        // Resource rounded rectangle half-extents
+        const hw = metrics.resW / 2 + margin;
+        const hh = metrics.resH / 2 + margin;
+        const tx = Math.abs(ux) > 1e-4 ? hw / Math.abs(ux) : Infinity;
+        const ty = Math.abs(uy) > 1e-4 ? hh / Math.abs(uy) : Infinity;
+        const t = Math.min(tx, ty);
+        return { x: node.x + ux * t, y: node.y + uy * t };
     }
 
     function drawGraph() {
         if (!canvas || !ctx) return;
         const { w, h } = getCssDimensions();
-        ctx.clearRect(0, 0, w, h);
+        drawBackgroundGrid(w, h);
 
         const nodes = getActiveNodes();
         const edges = getActiveEdges();
         if (nodes.length === 0) return;
 
-        const nodeMap = new Map();
-        for (const n of nodes) nodeMap.set(n.id, n);
-
+        const metrics = getNodeMetrics(nodes.length);
+        const nodeMap = new Map(nodes.map(n => [n.id, n]));
         const involvedProcs = new Set(currentResult?.involved_processes || []);
         const involvedRes = new Set(currentResult?.involved_resources || []);
         const victimId = currentResult?.recommended_victim;
 
-        // Build exact cycle directed pairs so non-cycle blocked workers (e.g. Worker D -> Worker B)
-        // are NEVER falsely colored as members of the deadlock cycle.
         const cycleEdgePairs = new Set();
         for (const cyc of (currentResult?.cycles || [])) {
             for (let i = 0; i < cyc.length - 1; i++) {
                 cycleEdgePairs.add(`${cyc[i]}->${cyc[i + 1]}`);
             }
         }
+
+        // Detect opposing bidirectional pairs so we curve them symmetrically apart
+        const pairSet = new Set(edges.map(e => `${e.from}->${e.to}`));
 
         // 1. Draw Edges
         for (const edge of edges) {
@@ -766,18 +1076,26 @@ const DeadlockGraph = (() => {
             if (currentViewMode === 'wfg') {
                 isCycleEdge = cycleEdgePairs.has(`${edge.from}->${edge.to}`);
             } else {
-                // RAG edge: highlight ONLY if the process endpoint is in the cycle AND resource is involved
                 const procId = fromNode.type === 'process' ? fromNode.id : toNode.id;
                 const resId = fromNode.type === 'resource' ? fromNode.id : toNode.id;
                 isCycleEdge = involvedProcs.has(procId) && involvedRes.has(resId);
             }
 
-            drawArrow(
-                fromNode.x, fromNode.y,
-                toNode.x, toNode.y,
+            const hasReverse = pairSet.has(`${edge.to}->${edge.from}`);
+            const curveAmount = hasReverse ? 42 : (currentViewMode === 'wfg' && nodes.length >= 4 ? 14 : 0);
+
+            const edgeLabel = currentViewMode === 'wfg'
+                ? cleanName(edge.resource || '')
+                : (edge.type === 'request' ? 'Waits' : 'Holds');
+
+            drawSmartArrow(
+                fromNode,
+                toNode,
+                metrics,
                 edge.type === 'request' ? 'dashed' : 'solid',
                 isCycleEdge,
-                edge.label || (edge.type === 'request' ? 'requests' : (edge.type === 'wait' ? edge.resource : 'holds'))
+                edgeLabel,
+                curveAmount
             );
         }
 
@@ -786,126 +1104,269 @@ const DeadlockGraph = (() => {
             const isProc = node.type === 'process';
             const isDeadlocked = isProc ? involvedProcs.has(node.id) : involvedRes.has(node.id);
             const isVictim = node.id === victimId;
-            drawNode(node, isProc, isDeadlocked, isVictim);
+            const isHovered = node.id === hoveredNodeId;
+            drawNode(node, metrics, isProc, isDeadlocked, isVictim, isHovered);
         }
     }
 
-    function drawNode(node, isProc, isDeadlocked, isVictim) {
-        const x = node.x;
-        const y = node.y;
+    function drawSmartArrow(fromNode, toNode, metrics, style, isCycleEdge, label, curveOffset) {
         ctx.save();
-
-        if (isVictim) {
-            ctx.strokeStyle = '#B98532';
-            ctx.lineWidth = Math.sin(pulsePhase) * 0.6 + 2.6;
-        } else if (isDeadlocked) {
-            ctx.strokeStyle = '#C85D5D';
-            ctx.lineWidth = Math.sin(pulsePhase) * 0.5 + 2.4;
-        } else {
-            ctx.strokeStyle = isProc ? '#52748D' : '#298F93';
-            ctx.lineWidth = 1.8;
-        }
-
-        if (isProc) {
-            const r = 25;
-            ctx.beginPath();
-            ctx.arc(x, y, r, 0, Math.PI * 2);
-            ctx.fillStyle = isVictim
-                ? 'rgba(185, 133, 50, 0.16)'
-                : (isDeadlocked ? 'rgba(200, 93, 93, 0.16)' : 'rgba(82, 116, 141, 0.12)');
-            ctx.fill();
-            ctx.stroke();
-
-            // Compact process label (e.g. "Worker A" / "Phil 1")
-            const rawLabel = (node.label || node.name || node.id).replace(/\s*\(PID\s+\d+\)/i, '');
-            const shortLabel = rawLabel.replace(/^Philosopher\s+/i, 'Phil ');
-            ctx.fillStyle = '#323035';
-            ctx.font = 'bold 10px "JetBrains Mono", monospace';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(shortLabel, x, y - 3);
-
-            if (isVictim) {
-                ctx.fillStyle = '#6E490D';
-                ctx.font = 'bold 8px "Inter", sans-serif';
-                ctx.fillText('VICTIM', x, y + 10);
-            } else if (node.recovery_priority !== undefined) {
-                ctx.fillStyle = '#625D62';
-                ctx.font = '8px "Inter", sans-serif';
-                ctx.fillText(`rec:${node.recovery_priority}`, x, y + 10);
-            }
-        } else {
-            const rw = 64;
-            const rh = 34;
-            ctx.beginPath();
-            ctx.roundRect(x - rw / 2, y - rh / 2, rw, rh, 6);
-            ctx.fillStyle = isDeadlocked ? 'rgba(200, 93, 93, 0.16)' : 'rgba(41, 143, 147, 0.12)';
-            ctx.fill();
-            ctx.stroke();
-
-            ctx.fillStyle = '#21777B';
-            ctx.font = 'bold 9px "JetBrains Mono", monospace';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(node.label || node.name || node.id, x, y - 4);
-
-            ctx.fillStyle = '#625D62';
-            ctx.font = '8px "JetBrains Mono", monospace';
-            const total = node.total !== undefined ? node.total : 1;
-            const avail = node.available !== undefined ? node.available : 0;
-            ctx.fillText(`${avail}/${total} inst`, x, y + 9);
-        }
-
-        ctx.restore();
-    }
-
-    function drawArrow(fromX, fromY, toX, toY, style, isDeadlocked, label) {
-        ctx.save();
-        const dx = toX - fromX;
-        const dy = toY - fromY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist === 0) {
+        const dx = toNode.x - fromNode.x;
+        const dy = toNode.y - fromNode.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 1) {
             ctx.restore();
             return;
         }
 
-        const nodeRadius = 28;
-        const startX = fromX + (dx / dist) * nodeRadius;
-        const startY = fromY + (dy / dist) * nodeRadius;
-        const endX = toX - (dx / dist) * nodeRadius;
-        const endY = toY - (dy / dist) * nodeRadius;
+        // Normal vector for optional curve
+        const nx = -dy / dist;
+        const ny = dx / dist;
+        const midX = (fromNode.x + toNode.x) / 2 + nx * curveOffset;
+        const midY = (fromNode.y + toNode.y) / 2 + ny * curveOffset;
 
-        ctx.strokeStyle = isDeadlocked ? '#C85D5D' : (style === 'dashed' ? '#B98532' : '#52748D');
-        ctx.lineWidth = isDeadlocked ? 2.2 : 1.6;
-        ctx.setLineDash(style === 'dashed' ? [5, 4] : []);
+        // Clip start & end cleanly to exact node boundaries using tangent towards control point
+        const startPt = clipToNodeBorder(fromNode, curveOffset ? midX : toNode.x, curveOffset ? midY : toNode.y, metrics, 3);
+        const endPt = clipToNodeBorder(toNode, curveOffset ? midX : fromNode.x, curveOffset ? midY : fromNode.y, metrics, 5);
+
+        const strokeColor = isCycleEdge
+            ? '#C85D5D'
+            : (style === 'dashed' ? '#B98532' : '#298F93');
+
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = isCycleEdge ? 2.4 : 1.8;
+        ctx.setLineDash(style === 'dashed' ? [6, 4] : []);
 
         ctx.beginPath();
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(endX, endY);
+        ctx.moveTo(startPt.x, startPt.y);
+        if (curveOffset !== 0) {
+            ctx.quadraticCurveTo(midX, midY, endPt.x, endPt.y);
+        } else {
+            ctx.lineTo(endPt.x, endPt.y);
+        }
         ctx.stroke();
 
-        const angle = Math.atan2(endY - startY, endX - startX);
-        const headLen = 9;
+        // Arrowhead aligned with exact end tangent
+        const tangentX = curveOffset !== 0 ? (endPt.x - midX) : (endPt.x - startPt.x);
+        const tangentY = curveOffset !== 0 ? (endPt.y - midY) : (endPt.y - startPt.y);
+        const angle = Math.atan2(tangentY, tangentX);
+        const headLen = 10;
+
         ctx.setLineDash([]);
-        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fillStyle = strokeColor;
         ctx.beginPath();
-        ctx.moveTo(endX, endY);
-        ctx.lineTo(endX - headLen * Math.cos(angle - Math.PI / 6), endY - headLen * Math.sin(angle - Math.PI / 6));
-        ctx.lineTo(endX - headLen * Math.cos(angle + Math.PI / 6), endY - headLen * Math.sin(angle + Math.PI / 6));
+        ctx.moveTo(endPt.x, endPt.y);
+        ctx.lineTo(endPt.x - headLen * Math.cos(angle - Math.PI / 6), endPt.y - headLen * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(endPt.x - headLen * Math.cos(angle + Math.PI / 6), endPt.y - headLen * Math.sin(angle + Math.PI / 6));
         ctx.closePath();
         ctx.fill();
 
-        if (label && dist > 65) {
-            const midX = (startX + endX) / 2;
-            const midY = (startY + endY) / 2;
-            ctx.fillStyle = isDeadlocked ? '#7E2B2B' : '#625D62';
-            ctx.font = '8px "JetBrains Mono", monospace';
+        // Pill-backed readable label at curve midpoint (t = 0.5)
+        if (label && dist > 62) {
+            const lx = curveOffset !== 0
+                ? 0.25 * startPt.x + 0.5 * midX + 0.25 * endPt.x
+                : (startPt.x + endPt.x) / 2;
+            const ly = curveOffset !== 0
+                ? 0.25 * startPt.y + 0.5 * midY + 0.25 * endPt.y
+                : (startPt.y + endPt.y) / 2;
+
+            ctx.font = '600 10px "Inter", sans-serif';
+            const textW = ctx.measureText(label).width;
+            const padX = 6;
+            const pillW = textW + padX * 2;
+            const pillH = 18;
+
+            ctx.fillStyle = isCycleEdge ? '#FDF1F1' : '#FFFCF7';
+            ctx.strokeStyle = isCycleEdge ? 'rgba(200, 93, 93, 0.45)' : 'rgba(180, 165, 150, 0.55)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(lx - pillW / 2, ly - pillH / 2, pillW, pillH, 9);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = isCycleEdge ? '#7E2B2B' : (style === 'dashed' ? '#6E490D' : '#215940');
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(label, midX, midY - 6);
+            ctx.fillText(label, lx, ly + 0.5);
         }
 
         ctx.restore();
+    }
+
+    function drawNode(node, metrics, isProc, isDeadlocked, isVictim, isHovered) {
+        const x = node.x;
+        const y = node.y;
+        ctx.save();
+
+        // Subtle elevation shadow
+        ctx.shadowColor = isHovered ? 'rgba(50, 48, 53, 0.20)' : 'rgba(50, 48, 53, 0.10)';
+        ctx.shadowBlur = isHovered ? 12 : 6;
+        ctx.shadowOffsetY = 2;
+
+        if (isVictim) {
+            ctx.strokeStyle = '#B98532';
+            ctx.lineWidth = Math.sin(pulsePhase) * 0.7 + 3.0;
+        } else if (isDeadlocked) {
+            ctx.strokeStyle = '#C85D5D';
+            ctx.lineWidth = Math.sin(pulsePhase) * 0.5 + 2.5;
+        } else {
+            ctx.strokeStyle = isProc ? '#52748D' : '#298F93';
+            ctx.lineWidth = isHovered ? 2.6 : 2.0;
+        }
+
+        if (isProc) {
+            const r = metrics.procRadius;
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = isVictim
+                ? '#FEF5E6'
+                : (isDeadlocked ? '#FCECEC' : '#F0F6FA');
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            // Main Name
+            ctx.fillStyle = '#323035';
+            ctx.font = `700 ${r >= 32 ? 11 : 10}px "Inter", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(shortCanvasName(node.label || node.name || node.id), x, y - 5);
+
+            // Second line: Priority
+            ctx.fillStyle = '#625D62';
+            ctx.font = '500 9px "JetBrains Mono", monospace';
+            const pri = node.recovery_priority !== undefined ? `Pri ${node.recovery_priority}` : '';
+            ctx.fillText(pri, x, y + 9);
+
+            // Top Ribbon Badge for Victim or Blocked (non-cycle waiter)
+            const isBlockedOnly = !isDeadlocked && Object.values(node.requesting || {}).some(v => v > 0);
+            if (isVictim || isBlockedOnly) {
+                const badgeText = isVictim ? 'STOP VICTIM' : 'BLOCKED';
+                ctx.font = '700 8px "Inter", sans-serif';
+                const bw = ctx.measureText(badgeText).width + 10;
+                const bh = 15;
+                const bx = x - bw / 2;
+                const by = y - r - bh / 2 - 2;
+                ctx.fillStyle = isVictim ? '#B98532' : '#52748D';
+                ctx.beginPath();
+                ctx.roundRect(bx, by, bw, bh, 7);
+                ctx.fill();
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillText(badgeText, x, by + bh / 2 + 0.5);
+            }
+        } else {
+            const rw = metrics.resW;
+            const rh = metrics.resH;
+            ctx.beginPath();
+            ctx.roundRect(x - rw / 2, y - rh / 2, rw, rh, 8);
+            ctx.fillStyle = isDeadlocked ? '#FDF0F0' : '#EBF7F6';
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            ctx.fillStyle = isDeadlocked ? '#7E2B2B' : '#195F63';
+            ctx.font = `700 ${rw >= 88 ? 10.5 : 9.5}px "Inter", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(cleanName(node.label || node.name || node.id), x, y - 6);
+
+            const total = node.total !== undefined ? node.total : 1;
+            const avail = node.available !== undefined ? node.available : 0;
+            const statusTxt = total === 1 ? (avail > 0 ? 'Free' : 'In Use') : `${avail}/${total} free`;
+            ctx.fillStyle = avail > 0 ? '#215940' : '#7E2B2B';
+            ctx.font = '600 9px "Inter", sans-serif';
+            ctx.fillText(statusTxt, x, y + 9);
+        }
+
+        ctx.restore();
+    }
+
+    // ── Interactive Node Hover Tooltip ───────────────────────────────────────
+
+    function handleCanvasMouseMove(e) {
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const nodes = getActiveNodes();
+        const metrics = getNodeMetrics(nodes.length);
+
+        let hit = null;
+        for (const n of nodes) {
+            if (n.x === undefined || n.y === undefined) continue;
+            if (n.type === 'process') {
+                if (Math.hypot(mx - n.x, my - n.y) <= metrics.procRadius + 4) {
+                    hit = n;
+                    break;
+                }
+            } else {
+                if (Math.abs(mx - n.x) <= metrics.resW / 2 + 4 && Math.abs(my - n.y) <= metrics.resH / 2 + 4) {
+                    hit = n;
+                    break;
+                }
+            }
+        }
+
+        if (hit) {
+            canvas.style.cursor = 'pointer';
+            if (hoveredNodeId !== hit.id) {
+                hoveredNodeId = hit.id;
+                drawGraph();
+            }
+            showNodeTooltip(hit, mx, my);
+        } else {
+            canvas.style.cursor = 'default';
+            if (hoveredNodeId !== null) {
+                hoveredNodeId = null;
+                drawGraph();
+            }
+            hideTooltip();
+        }
+    }
+
+    function showNodeTooltip(node, mx, my) {
+        if (!tooltipEl) return;
+        const involved = new Set(currentResult?.involved_processes || []);
+        let html = '';
+        if (node.type === 'process') {
+            const holds = Object.entries(node.allocated || {}).filter(([, v]) => v > 0).map(([k]) => cleanName(k)).join(', ') || 'None';
+            const waits = Object.entries(node.requesting || {}).filter(([, v]) => v > 0).map(([k]) => cleanName(k)).join(', ') || 'None';
+            const roleNote = node.id === currentResult?.recommended_victim
+                ? 'Recommended victim (lowest priority in cycle)'
+                : (involved.has(node.id) ? 'Part of deadlock cycle' : 'Not in deadlock cycle');
+            html = `
+                <div style="font-weight:700;margin-bottom:3px;">${escapeHtml(cleanName(node.name))} ${node.os_pid ? `(PID ${node.os_pid})` : ''}</div>
+                <div>Priority: <strong>${node.recovery_priority ?? node.priority}</strong></div>
+                <div>Holding: <strong>${escapeHtml(holds)}</strong></div>
+                <div>Waiting for: <strong>${escapeHtml(waits)}</strong></div>
+                <div style="margin-top:3px;color:#FEF4B7;">${escapeHtml(roleNote)}</div>
+            `;
+        } else {
+            const total = node.total ?? 1;
+            const avail = node.available ?? 0;
+            html = `
+                <div style="font-weight:700;margin-bottom:3px;">Lock: ${escapeHtml(cleanName(node.name))}</div>
+                <div>Status: <strong>${avail > 0 ? 'Free' : 'In Use'}</strong> (${avail}/${total} available)</div>
+            `;
+        }
+
+        tooltipEl.innerHTML = html;
+        tooltipEl.style.display = 'block';
+        const { w, h } = getCssDimensions();
+        const tx = mx + 14 + 220 > w ? Math.max(8, mx - 225) : mx + 14;
+        const ty = my + 14 + 110 > h ? Math.max(8, my - 110) : my + 14;
+        tooltipEl.style.left = `${tx}px`;
+        tooltipEl.style.top = `${ty}px`;
+    }
+
+    function hideTooltip() {
+        if (tooltipEl) tooltipEl.style.display = 'none';
     }
 
     function renderWfgResults(res, snap) {
@@ -917,86 +1378,96 @@ const DeadlockGraph = (() => {
         if (res.has_deadlock) {
             box.style.borderColor = 'var(--status-danger)';
             box.style.background = 'var(--status-danger-bg)';
-            const cycleCount = res.cycles?.length || 1;
-            const cyclePath = res.cycles && res.cycles[0] ? res.cycles[0].join(' &rarr; ') : '';
-            title.innerHTML = `<span style="color: var(--status-danger-text); font-weight: 700;">LIVE DEADLOCK DETECTED (${cycleCount} Cycle${cycleCount > 1 ? 's' : ''}) &bull; Snapshot v${snap.snapshot_version}</span>`;
+            const cyclePath = res.cycles && res.cycles[0]
+                ? res.cycles[0].map(id => cleanName(id)).join(' → ')
+                : '';
+            const victimName = res.recommended_victim ? cleanName(res.recommended_victim) : 'None';
+            const totalProcs = (snap.workers || []).length;
+            const cycleCount = (res.involved_processes || []).length;
+            const outsideNote = totalProcs > cycleCount
+                ? ` (${totalProcs - cycleCount} other process is blocked outside the cycle and will unblock automatically once the cycle is broken.)`
+                : '';
+
+            title.innerHTML = `<span style="color: var(--status-danger-text); font-weight: 700;">Circular Wait Deadlock Found</span>`;
             detail.innerHTML = `
-                ${cyclePath ? `<div style="margin-bottom: 6px; font-family: var(--font-mono); font-size: 0.8rem; color: var(--status-danger-text);"><strong>DFS Cycle:</strong> ${cyclePath}</div>` : ''}
-                <div style="color: var(--text-primary); margin-bottom: 2px;"><strong>Cycle Members:</strong> ${escapeHtml(res.involved_processes?.join(', ') || 'None')}</div>
-                <div style="color: var(--text-primary); margin-bottom: 4px;"><strong>Contended Mutexes:</strong> ${escapeHtml(res.involved_resources?.join(', ') || 'None')}</div>
-                <div style="margin-top: 6px; color: var(--status-warning-text); font-weight: 600;">
-                    Recommended Preemption Victim: ${escapeHtml(res.recommended_victim || 'None')}
-                    <br><span style="font-size: 0.76rem; font-weight: 400; color: var(--text-secondary);">${escapeHtml(res.victim_reason || '')}</span>
+                ${cyclePath ? `<div style="margin-bottom: 4px; font-weight: 600; color: var(--status-danger-text);">Cycle: ${escapeHtml(cyclePath)}</div>` : ''}
+                <div style="color: var(--text-primary);">
+                    Suggested action: Stop <strong>${escapeHtml(victimName)}</strong> (lowest priority inside the cycle).${escapeHtml(outsideNote)}
                 </div>
             `;
         } else {
             box.style.borderColor = 'var(--status-success)';
             box.style.background = 'var(--status-success-bg)';
-            title.innerHTML = `<span style="color: var(--status-success-text); font-weight: 700;">NO DEADLOCK CYCLE — ${escapeHtml(snap.workload_name)} (Snapshot v${snap.snapshot_version})</span>`;
+            title.innerHTML = `<span style="color: var(--status-success-text); font-weight: 700;">No Deadlock Cycle</span>`;
             detail.textContent = snap.selective_recovery_succeeded
-                ? 'Selective recovery verified: circular wait eliminated and remaining workers completed cleanly.'
-                : 'No circular wait detected in the live Wait-For Graph.';
+                ? 'The circular wait has been broken and surviving workers finished cleanly.'
+                : 'No circular blocking exists right now.';
         }
     }
 
-    // ── LIVE BANKER'S ALGORITHM Renderer (Strict Live Snapshot Only) ─────────
+    // ── LIVE BANKER'S ALGORITHM Renderer ─────────────────────────────────────
 
     function renderLiveBankerFromSnapshot(snap) {
         const bk = snap.banker_analysis;
         const bkBadge = document.getElementById('bankerSnapshotBadge');
-        const resList = document.getElementById('bankerResourcesList');
+        const availChips = document.getElementById('bankerAvailableChips');
         const thead = document.getElementById('bankerTableHead');
         const tbody = document.getElementById('bankerTableBody');
         const availVec = document.getElementById('bankerAvailableVec');
         const safeSeqEl = document.getElementById('bankerSafeSeqInline');
         const resultBox = document.getElementById('bankerResultBox');
 
-        if (bkBadge) bkBadge.textContent = `Snapshot v${snap.snapshot_version}`;
+        if (bkBadge) bkBadge.textContent = `v${snap.snapshot_version}`;
         if (!bk || !tbody) return;
 
         const resources = bk.resource_names || [];
-        if (resList) {
-            resList.textContent = resources.length > 0 ? resources.join(', ') : '--';
-        }
         if (thead) {
-            const shortRes = resources.map(r => r.replace(/^Chopstick_/, 'C').replace(/^Mutex_/, 'M').replace(/^Lock_/, 'L')).join(' ');
-            const hdrSuffix = shortRes ? ` (${escapeHtml(shortRes)})` : '';
+            const shortRes = resources.map(r => r.replace(/^Chopstick_/, 'C').replace(/^Mutex_/, 'M').replace(/^Lock_/, 'L').replace(/^Shared_/, '').replace(/_Lock$/, '')).join(' ');
+            const hdrSuffix = shortRes ? ` <span style="font-weight:400;color:var(--text-muted);">(${escapeHtml(shortRes)})</span>` : '';
             thead.innerHTML = `
                 <tr>
                     <th>Process</th>
-                    <th>Allocation${hdrSuffix}</th>
-                    <th>Max Claim${hdrSuffix}</th>
-                    <th>Need${hdrSuffix}</th>
-                    <th>Finish</th>
+                    <th>Holding${hdrSuffix}</th>
+                    <th>Max Need${hdrSuffix}</th>
+                    <th>Still Needs${hdrSuffix}</th>
+                    <th>Can Finish?</th>
                 </tr>
             `;
         }
 
         if (!bk.data_available) {
+            if (availChips) availChips.innerHTML = '<span class="dl-chip dl-chip-muted">Not Available</span>';
             if (availVec) availVec.textContent = 'NOT AVAILABLE';
-            if (safeSeqEl) safeSeqEl.textContent = 'NOT AVAILABLE';
+            if (safeSeqEl) safeSeqEl.textContent = 'Not Available';
             tbody.innerHTML = `
                 <tr>
                     <td colspan="5" style="text-align: center; color: var(--text-muted); padding: var(--space-md);">
-                        NOT AVAILABLE — ${escapeHtml(bk.semantic_note || 'Required maximum claims or live state unavailable.')}
+                        NOT AVAILABLE — live claim data is not available for this state.
                     </td>
                 </tr>
             `;
             if (resultBox) {
                 resultBox.style.display = 'block';
                 resultBox.className = 'banker-result';
-                resultBox.innerHTML = `<strong>Banker's Status: NOT AVAILABLE</strong><div style="font-size:0.78rem;margin-top:4px;">${escapeHtml(bk.semantic_note || '')}</div>`;
+                resultBox.innerHTML = `<strong>Banker's Result: NOT AVAILABLE</strong>`;
             }
             return;
         }
 
-        if (availVec) {
-            availVec.textContent = `[ ${(bk.available || []).join('  ')} ]`;
+        const availArr = bk.available || [];
+        if (availChips) {
+            availChips.innerHTML = resources.map((r, i) => {
+                const v = availArr[i] ?? 0;
+                return `<span class="dl-chip ${v > 0 ? 'dl-chip-avail' : 'dl-chip-zero'}">${escapeHtml(cleanName(r))}: ${v}</span>`;
+            }).join('');
         }
+        if (availVec) availVec.textContent = `[ ${availArr.join(', ')} ]`;
+
+        const cleanSeq = (bk.safe_sequence || []).map(p => cleanName(p));
         if (safeSeqEl) {
             safeSeqEl.textContent = bk.is_safe
-                ? ((bk.safe_sequence && bk.safe_sequence.length) ? bk.safe_sequence.join(' → ') : 'All Finished')
-                : 'None (UNSAFE)';
+                ? (cleanSeq.length ? cleanSeq.join(' → ') : 'All Done')
+                : 'None (Unsafe)';
         }
 
         const procs = bk.process_names || [];
@@ -1009,7 +1480,9 @@ const DeadlockGraph = (() => {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="5" style="text-align: center; color: var(--text-muted); padding: var(--space-md);">
-                        ${escapeHtml(bk.semantic_note || 'No active workers holding resources.')}
+                        ${snap.status === 'resolved' || snap.status === 'completed'
+                            ? 'All remaining processes have released their locks and finished.'
+                            : 'Waiting for workers to declare resource claims...'}
                     </td>
                 </tr>
             `;
@@ -1022,11 +1495,11 @@ const DeadlockGraph = (() => {
                 const finVal = finish[i] === true;
                 html += `
                     <tr>
-                        <td style="font-weight: 700; color: var(--accent-hover);">${escapeHtml(procs[i])}</td>
-                        <td style="font-family: var(--font-mono);">[ ${escapeHtml(aStr)} ]</td>
-                        <td style="font-family: var(--font-mono);">[ ${escapeHtml(mStr)} ]</td>
-                        <td style="font-family: var(--font-mono); color: var(--status-info-text); font-weight: 600;">[ ${escapeHtml(nStr)} ]</td>
-                        <td><span class="priority-badge ${finVal ? 'normal' : 'high'}">${finVal ? 'TRUE' : 'FALSE'}</span></td>
+                        <td style="font-weight: 700; color: var(--text-primary); text-align: left;">${escapeHtml(cleanName(procs[i]))}</td>
+                        <td>[ ${escapeHtml(aStr)} ]</td>
+                        <td>[ ${escapeHtml(mStr)} ]</td>
+                        <td style="color: var(--status-info-text); font-weight: 600;">[ ${escapeHtml(nStr)} ]</td>
+                        <td><span class="priority-badge ${finVal ? 'normal' : 'high'}">${finVal ? 'YES' : 'NO'}</span></td>
                     </tr>
                 `;
             }
@@ -1035,24 +1508,25 @@ const DeadlockGraph = (() => {
 
         if (resultBox) {
             resultBox.style.display = 'block';
-            const noteHtml = bk.semantic_note
-                ? `<div style="font-size: 0.76rem; margin-top: 4px; color: var(--text-secondary);">${escapeHtml(bk.semantic_note)}</div>`
-                : '';
             if (bk.is_safe) {
                 resultBox.className = 'banker-result safe';
                 resultBox.innerHTML = `
-                    <div style="font-size: 0.9rem; margin-bottom: 4px;">Live Banker's State: <strong>SAFE</strong> (Snapshot v${snap.snapshot_version})</div>
-                    <div style="font-size: 0.8rem; font-family: var(--font-mono);">
-                        Safe Sequence: <strong>${bk.safe_sequence && bk.safe_sequence.length ? escapeHtml(bk.safe_sequence.join(' → ')) : 'All Processes Completed'}</strong>
+                    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 2px;">SAFE — System Can Finish Cleanly</div>
+                    <div style="font-size: 0.8rem;">
+                        ${cleanSeq.length ? `Safe order: <strong>${escapeHtml(cleanSeq.join(' → '))}</strong>` : 'All remaining workers finished and released their locks.'}
                     </div>
-                    ${noteHtml}
                 `;
             } else {
                 resultBox.className = 'banker-result unsafe';
+                const heading = bk.actual_deadlock_exists
+                    ? 'UNSAFE — Deadlock Active'
+                    : 'UNSAFE — Deadlock Risk (No Active Cycle Yet)';
+                const expl = bk.actual_deadlock_exists
+                    ? 'No process can satisfy its remaining lock needs with the available locks. Stop the recommended worker to recover.'
+                    : 'No guaranteed safe completion sequence exists for the declared maximum needs, though no active circular wait is blocking yet.';
                 resultBox.innerHTML = `
-                    <div style="font-size: 0.9rem; margin-bottom: 4px;">Live Banker's State: <strong>UNSAFE</strong> (Snapshot v${snap.snapshot_version})</div>
-                    <div style="font-size: 0.8rem; font-family: var(--font-mono);">Safe Sequence: <strong>None</strong></div>
-                    ${noteHtml}
+                    <div style="font-size: 0.9rem; font-weight: 700; margin-bottom: 2px;">${heading}</div>
+                    <div style="font-size: 0.8rem;">${expl}</div>
                 `;
             }
         }
@@ -1062,21 +1536,18 @@ const DeadlockGraph = (() => {
 
     async function approveLiveRecovery() {
         if (!currentLiveRun || !currentLiveRun.is_active_run || !currentLiveRun.deadlock_detection?.recommended_victim_details) {
-            App.showToast('No active deadlocked victim available for recovery', 'warning');
+            App.showToast('No active deadlocked worker available to stop.', 'warning');
             return;
         }
         const runId = currentLiveRun.run_id;
         const victim = currentLiveRun.deadlock_detection.recommended_victim_details;
-        const sandboxName = currentLiveRun.sandbox.sandbox_name;
+        const victimName = cleanName(victim.name);
 
         const ok = confirm(
-            `APPROVE SELECTIVE RECOVERY?\n\n` +
-            `Scenario: ${currentLiveRun.workload_name} (${runId})\n` +
-            `Sandbox: ${sandboxName}\n` +
-            `Victim Worker: ${victim.name} (OS PID ${victim.pid})\n` +
-            `Application Recovery Priority: ${victim.recovery_priority} (lowest eligible in cycle)\n\n` +
-            `Only PID ${victim.pid} will be terminated via TerminateProcess.\n` +
-            `The Windows Job Object and Supervisor PID ${currentLiveRun.supervisor.pid} will remain active.`
+            `Stop ${victimName} (PID ${victim.pid}) to break the deadlock?\n\n` +
+            `• Scenario: ${currentLiveRun.workload_name}\n` +
+            `• Priority: ${victim.recovery_priority} (lowest in cycle)\n` +
+            `• Only ${victimName} will be stopped; the supervisor and sandbox remain active.`
         );
         if (!ok) return;
 
@@ -1084,7 +1555,7 @@ const DeadlockGraph = (() => {
             const chRes = await fetch(`/api/deadlock/live/runs/${runId}/recovery-challenge`);
             if (!chRes.ok) {
                 const err = await chRes.json();
-                App.showToast(`Recovery challenge failed: ${err.detail || 'Error'}`, 'error');
+                App.showToast(`Recovery check failed: ${err.detail || 'Error'}`, 'error');
                 return;
             }
             const challenge = await chRes.json();
@@ -1100,7 +1571,7 @@ const DeadlockGraph = (() => {
                     pid: challenge.pid,
                     create_time_100ns: challenge.create_time_100ns,
                     approved: true,
-                    operator_note: 'Approved via Web Dashboard operator prompt',
+                    operator_note: 'Approved from dashboard',
                 }),
             });
 
@@ -1109,13 +1580,13 @@ const DeadlockGraph = (() => {
                 if (data.run) applyAuthoritativeSnapshot(data.run);
                 App.showToast(
                     data.deadlock_resolved
-                        ? `Deadlock resolved! Victim PID ${victim.pid} terminated & WAIT_ABANDONED reconciled.`
-                        : `Victim terminated; re-evaluating graph.`,
+                        ? `Deadlock resolved! Stopped ${victimName} and remaining workers recovered.`
+                        : `Stopped ${victimName}; re-checking dependency graph.`,
                     data.deadlock_resolved ? 'success' : 'warning'
                 );
             } else {
                 const err = await recRes.json();
-                App.showToast(`Recovery rejected: ${err.detail || 'Error'}`, 'error');
+                App.showToast(`Recovery blocked: ${err.detail || 'Error'}`, 'error');
             }
         } catch (e) {
             App.showToast(`Recovery request failed: ${e.message}`, 'error');
@@ -1125,22 +1596,20 @@ const DeadlockGraph = (() => {
     async function abortLiveRun() {
         if (!currentLiveRun || !currentLiveRun.is_active_run) return;
         const runId = currentLiveRun.run_id;
-        if (!confirm(`Abort entire sandbox '${currentLiveRun.sandbox.sandbox_name}' via TerminateJobObject?`)) {
-            return;
-        }
+        if (!confirm(`Stop the entire ${currentLiveRun.workload_name} sandbox?`)) return;
         try {
             const res = await fetch(`/api/deadlock/live/runs/${runId}`, { method: 'DELETE' });
             if (res.ok) {
                 const abortedSnap = await res.json();
                 applyAuthoritativeSnapshot(abortedSnap);
-                App.showToast(`Run ${runId} aborted & live graph cleared`, 'info');
+                App.showToast(`Stopped ${currentLiveRun.workload_name} and cleared the live graph.`, 'info');
             }
         } catch (e) {
             App.showToast(`Abort failed: ${e.message}`, 'error');
         }
     }
 
-    // ── Isolated Educational Practice Scenarios (Never Touch Live View) ──────
+    // ── Isolated Offline Practice Scenarios ──────────────────────────────────
 
     async function loadPracticeWfgScenario() {
         const sel = document.getElementById('practiceWfgScenarioSelect');
@@ -1153,15 +1622,16 @@ const DeadlockGraph = (() => {
             if (!res.ok) return;
             const data = await res.json();
             const r = data.result;
-            const cycleText = r.cycles && r.cycles.length ? r.cycles.map(c => c.join(' -> ')).join(' | ') : 'None';
+            const cycleText = r.cycles && r.cycles.length
+                ? r.cycles.map(c => c.map(cleanName).join(' → ')).join(' | ')
+                : 'None';
             out.innerHTML = `
-                <div><strong>Scenario:</strong> ${escapeHtml(scenarioId)} (${data.graph.nodes.length} nodes)</div>
-                <div><strong>Deadlock:</strong> ${r.has_deadlock ? 'YES' : 'NO'} &bull; <strong>Cycles:</strong> ${escapeHtml(cycleText)}</div>
-                <div><strong>Recommended Victim:</strong> ${escapeHtml(r.recommended_victim || 'None')}</div>
-                <div style="margin-top:4px;color:var(--text-muted);">${escapeHtml(r.victim_reason || 'No preemption needed.')}</div>
+                <div><strong>Result:</strong> ${r.has_deadlock ? 'Deadlock Found' : 'No Deadlock'}</div>
+                <div><strong>Cycle:</strong> ${escapeHtml(cycleText)}</div>
+                <div><strong>Suggested Victim:</strong> ${escapeHtml(r.recommended_victim ? cleanName(r.recommended_victim) : 'None')}</div>
             `;
         } catch (e) {
-            out.textContent = `Failed to load practice scenario: ${e.message}`;
+            out.textContent = `Could not load example: ${e.message}`;
         }
     }
 
@@ -1175,12 +1645,11 @@ const DeadlockGraph = (() => {
             const s = data.scenario;
             const r = data.result;
             out.innerHTML = `
-                <div><strong>Example:</strong> ${escapeHtml(scenarioId.toUpperCase())} &bull; <strong>Available:</strong> [${s.available.join(', ')}]</div>
-                <div><strong>Processes:</strong> ${escapeHtml(s.processes.join(', '))} &bull; <strong>Resources:</strong> ${escapeHtml(s.resources.join(', '))}</div>
-                <div><strong>Result:</strong> ${r.is_safe ? 'SAFE' : 'UNSAFE'} &bull; <strong>Safe Sequence:</strong> ${r.safe_sequence.length ? escapeHtml(r.safe_sequence.join(' -> ')) : 'None'}</div>
+                <div><strong>State:</strong> ${r.is_safe ? 'SAFE' : 'UNSAFE'} · <strong>Available:</strong> [${s.available.join(', ')}]</div>
+                <div><strong>Safe Order:</strong> ${r.safe_sequence.length ? escapeHtml(r.safe_sequence.join(' → ')) : 'None'}</div>
             `;
         } catch (e) {
-            out.textContent = `Failed to load practice Banker example: ${e.message}`;
+            out.textContent = `Could not load example: ${e.message}`;
         }
     }
 
@@ -1196,6 +1665,7 @@ const DeadlockGraph = (() => {
 
     return {
         init,
+        setViewMode,
         toggleViewMode,
         updateFromTelemetry,
         handleLiveSnapshotPush,

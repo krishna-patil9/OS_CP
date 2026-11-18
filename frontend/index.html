@@ -347,113 +347,121 @@
             <!-- TAB 3: DEADLOCK & CONCURRENCY ENGINE                           -->
             <!-- ═══════════════════════════════════════════════════════════════ -->
             <section id="panelDeadlock" class="tab-panel" role="tabpanel">
-                <!-- Real-Time Windows-Native Live Deadlock Monitor & Selective Recovery -->
+                <!-- Live Deadlock Monitor & Recovery -->
                 <div class="card" id="liveDeadlockCard" style="margin-bottom: var(--space-lg);">
                     <div class="card-header">
                         <div class="card-title">
                             <span class="icon" aria-hidden="true">
                                 <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><polyline points="9 12 11 14 15 10"></polyline></svg>
                             </span>
-                            Real-Time Live OS Deadlock Monitor (Windows Job Object + Named Mutexes)
+                            Live Deadlock Monitor
                         </div>
                         <div class="btn-group">
-                            <select id="liveRunSelect" class="form-select form-select-sm" style="min-width: 260px;">
-                                <option value="">-- Waiting for Live Workload --</option>
+                            <select id="liveRunSelect" class="form-select form-select-sm" style="min-width: 240px;">
+                                <option value="">Waiting for a live workload...</option>
                             </select>
-                            <button class="btn btn-sm btn-outline" id="btnReturnToLive" style="display: none;">Return to Live</button>
+                            <button class="btn btn-sm btn-outline" id="btnReturnToLive" style="display: none;">Back to Live</button>
                             <span class="card-badge" id="liveAutoSyncBadge" style="background: var(--status-success-bg); color: var(--status-success-text);">AUTO-SYNC LIVE</span>
                         </div>
                     </div>
-                    <p class="card-desc">
-                        Run <code>python workloads\circular_deadlock.py</code>, <code>python workloads\dining_philosophers.py</code>, or <code>python workloads\multi_resource_deadlock.py</code> in a separate terminal. Live RAG, WFG, and Banker's Algorithm update automatically from a single versioned snapshot.
-                    </p>
 
-                    <!-- Clean Empty State when no live workload is active -->
+                    <!-- Clean Empty State -->
                     <div id="liveRunEmptyState" style="padding: var(--space-lg); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px dashed var(--border-default); text-align: center;">
-                        <div style="font-weight: 700; font-size: 0.96rem; letter-spacing: 0.04em; color: var(--text-primary); margin-bottom: 6px;">
+                        <div style="font-weight: 700; font-size: 0.94rem; letter-spacing: 0.03em; color: var(--text-primary); margin-bottom: 6px;">
                             NO ACTIVE DEADLOCK WORKLOAD
                         </div>
-                        <div style="font-size: 0.84rem; color: var(--text-secondary); margin-bottom: 10px;">
-                            Run one of the three Python scenario files from a separate VS Code terminal.
+                        <div style="font-size: 0.84rem; color: var(--text-secondary); margin-bottom: 12px;">
+                            Start any scenario in a second terminal — live graphs and recovery controls appear automatically.
                         </div>
-                        <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 10px; font-family: var(--font-mono); font-size: 0.78rem;">
+                        <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 8px; font-family: var(--font-mono); font-size: 0.78rem;">
                             <code>python workloads\circular_deadlock.py</code>
                             <code>python workloads\dining_philosophers.py</code>
                             <code>python workloads\multi_resource_deadlock.py</code>
                         </div>
-                        <div style="font-size: 0.78rem; color: var(--text-muted);">
+                        <div style="font-size: 0.76rem; color: var(--text-muted);">
                             Waiting for live workload registration...
                         </div>
                     </div>
 
-                    <!-- Historical Inspection Banner (only visible when explicitly viewing a past run) -->
-                    <div id="liveHistoryBanner" style="display: none; margin-bottom: var(--space-sm); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default); font-size: 0.82rem; color: var(--text-secondary);">
+                    <!-- Historical Inspection Banner -->
+                    <div id="liveHistoryBanner" style="display: none; margin-bottom: var(--space-sm); padding: 8px 12px; border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default); font-size: 0.82rem; color: var(--text-secondary);">
                     </div>
 
                     <div id="liveRunActiveContent" style="display: none;">
-                        <!-- Status & Watchdog Summary Strip -->
-                        <div style="display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; justify-content: space-between; margin-bottom: var(--space-md); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default);">
-                            <div style="display: flex; flex-wrap: wrap; gap: var(--space-md); align-items: center; font-size: 0.82rem;">
-                                <span><strong>Scenario:</strong> <span id="liveRunScenarioName" style="font-weight: 700;">--</span></span>
-                                <span><strong>Status:</strong> <span id="liveRunStatusBadge" class="priority-badge normal">--</span></span>
-                                <span><strong>Sandbox:</strong> <code id="liveRunSandboxName">--</code></span>
-                                <span><strong>Supervisor:</strong> <code id="liveRunSupervisorInfo">--</code></span>
-                                <span><strong>Limits:</strong> <span id="liveRunLimitsInfo">--</span></span>
+                        <!-- Clean 4-Tile Summary Bar -->
+                        <div class="dl-summary-grid">
+                            <div class="dl-summary-tile">
+                                <span class="dl-summary-label">Scenario</span>
+                                <div class="dl-summary-value">
+                                    <span id="liveRunScenarioName">--</span>
+                                    <span id="liveRunStatusBadge" class="priority-badge normal">--</span>
+                                </div>
+                                <span class="dl-summary-sub" id="liveSnapshotVersionBadge">Update #0</span>
                             </div>
-                            <div style="display: flex; gap: var(--space-md); align-items: center; font-family: var(--font-mono); font-size: 0.8rem;">
-                                <span id="liveSnapshotVersionBadge" style="color: var(--text-secondary);">Snapshot v0</span>
-                                <span style="font-weight: 700; color: var(--status-warning-text);">Watchdog: <span id="liveWatchdogCountdown">--s</span></span>
+                            <div class="dl-summary-tile">
+                                <span class="dl-summary-label">Windows Sandbox</span>
+                                <div class="dl-summary-value" id="liveRunSandboxName">--</div>
+                                <span class="dl-summary-sub" id="liveRunLimitsInfo">--</span>
+                            </div>
+                            <div class="dl-summary-tile">
+                                <span class="dl-summary-label">Supervisor Process</span>
+                                <div class="dl-summary-value" id="liveRunSupervisorInfo">--</div>
+                                <span class="dl-summary-sub" id="liveRunWorkersCount">--</span>
+                            </div>
+                            <div class="dl-summary-tile">
+                                <span class="dl-summary-label">Safety Timer</span>
+                                <div class="dl-summary-value" style="font-family: var(--font-mono); color: var(--status-warning-text);" id="liveWatchdogCountdown">--s</div>
+                                <span class="dl-summary-sub">Auto-stops if unresolved</span>
                             </div>
                         </div>
 
-                        <!-- Explicit User-Approved Selective Recovery Banner -->
-                        <div id="liveRecoveryBox" style="display: none; margin-bottom: var(--space-md); padding: var(--space-md); border-radius: var(--radius-sm); background: var(--status-danger-bg); border: 1px solid var(--status-danger);">
+                        <!-- Actionable Recovery Callout -->
+                        <div id="liveRecoveryBox" style="display: none; margin-bottom: var(--space-md); padding: 14px 16px; border-radius: var(--radius-sm); background: var(--status-danger-bg); border: 1px solid var(--status-danger);">
                             <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-sm);">
-                                <div>
-                                    <div style="font-weight: 700; color: var(--status-danger-text); font-size: 0.9rem;" id="liveRecoveryTitle">
-                                        LIVE DEADLOCK DETECTED — Explicit User Approval Required
+                                <div style="max-width: 680px;">
+                                    <div style="font-weight: 700; color: var(--status-danger-text); font-size: 0.92rem;" id="liveRecoveryTitle">
+                                        Deadlock Detected — Approval Needed
                                     </div>
-                                    <div style="font-size: 0.82rem; color: var(--text-primary); margin-top: 4px;" id="liveRecoveryDetail">
+                                    <div style="font-size: 0.84rem; color: var(--text-primary); margin-top: 4px; line-height: 1.45;" id="liveRecoveryDetail">
                                         --
                                     </div>
                                 </div>
                                 <div class="btn-group">
                                     <button class="btn btn-sm btn-danger" id="btnApproveLiveRecovery">
-                                        Approve &amp; Terminate Victim Worker
+                                        Stop Recommended Worker
                                     </button>
-                                    <button class="btn btn-sm btn-outline" id="btnAbortLiveRun" title="Whole-job TerminateJobObject emergency teardown">
-                                        Abort Sandbox
+                                    <button class="btn btn-sm btn-outline" id="btnAbortLiveRun" title="Stop the entire sandbox">
+                                        Abort All
                                     </button>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Post-Recovery / Aborted / Watchdog Outcome Banner -->
-                        <div id="liveOutcomeBox" style="display: none; margin-bottom: var(--space-md); padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); font-size: 0.84rem;">
+                        <div id="liveOutcomeBox" style="display: none; margin-bottom: var(--space-md); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 0.84rem; line-height: 1.45;">
                         </div>
 
-                        <!-- Workers & Event Audit Grid -->
+                        <!-- Clean Workers Table & Human-Friendly Activity Feed -->
                         <div class="grid-2" style="gap: var(--space-md);">
                             <div class="data-table-wrapper">
                                 <table class="data-table">
                                     <thead>
                                         <tr>
-                                            <th>Worker</th>
-                                            <th>PID / TID</th>
-                                            <th>Recovery Pri (vs OS)</th>
-                                            <th>Job Verified</th>
-                                            <th>Holds / Waits</th>
-                                            <th>State</th>
+                                            <th>Process</th>
+                                            <th>Priority</th>
+                                            <th>Holding</th>
+                                            <th>Waiting For</th>
+                                            <th>Status</th>
                                         </tr>
                                     </thead>
                                     <tbody id="liveWorkersTableBody"></tbody>
                                 </table>
                             </div>
-                            <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-sm); background: var(--bg-surface-alt); max-height: 220px; overflow-y: auto;">
-                                <div style="font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px;">
-                                    Live Synchronization &amp; OS WAIT_ABANDONED Audit Log
+                            <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--bg-surface-alt); max-height: 230px; overflow-y: auto;">
+                                <div style="font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 8px;">
+                                    Live Activity Feed
                                 </div>
-                                <div id="liveEventLog" style="font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.45;"></div>
+                                <div id="liveEventLog" class="dl-feed"></div>
                             </div>
                         </div>
                     </div>
@@ -461,60 +469,67 @@
 
                 <!-- Authoritative Synchronized Live Graphs: RAG/WFG + Live Banker's Algorithm -->
                 <div class="grid-2" style="margin-bottom: var(--space-lg);">
-                    <!-- Live Resource Allocation & Wait-For Graph -->
+                    <!-- Live RAG / WFG Visualizer -->
                     <div class="card">
                         <div class="card-header">
                             <div class="card-title">
                                 <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
                                 </span>
-                                Live RAG / Wait-For Graph (WFG)
+                                Dependency Graph
                             </div>
-                            <div class="btn-group">
-                                <span class="card-badge" id="wfgSnapshotBadge">Snapshot --</span>
-                                <button class="btn btn-sm btn-outline" id="btnToggleGraphView" title="Toggle between RAG (Processes + Resources) and WFG (Processes only)">Mode: RAG (P + R)</button>
+                            <div class="btn-group" style="align-items: center;">
+                                <span class="card-badge" id="wfgSnapshotBadge">v--</span>
+                                <div class="dl-segmented" role="group" aria-label="Graph View Mode">
+                                    <button type="button" class="dl-seg-btn active" id="btnViewRag">RAG (Locks + Procs)</button>
+                                    <button type="button" class="dl-seg-btn" id="btnViewWfg">WFG (Procs Only)</button>
+                                </div>
                             </div>
                         </div>
-                        <p class="card-desc">
-                            Real-time dependency graph built strictly from live Windows Named Mutex ownership and wait events.
+                        <p class="card-desc" id="graphModeHelper">
+                            Shows which process holds each lock and which lock it is waiting for. Hover any node for details.
                         </p>
 
                         <div class="graph-canvas-container" style="position: relative;">
-                            <canvas id="wfgCanvas" width="600" height="360"></canvas>
+                            <canvas id="wfgCanvas" width="620" height="420"></canvas>
+                            <div id="graphHoverTooltip" class="graph-tooltip"></div>
                             <div id="wfgEmptyOverlay" style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; background: var(--bg-surface-alt); border-radius: var(--radius-sm);">
-                                <div style="font-weight: 700; font-size: 0.92rem; letter-spacing: 0.04em; color: var(--text-primary); margin-bottom: 6px;">
+                                <div style="font-weight: 700; font-size: 0.92rem; letter-spacing: 0.03em; color: var(--text-primary); margin-bottom: 6px;">
                                     NO ACTIVE DEADLOCK WORKLOAD
                                 </div>
-                                <div style="font-size: 0.82rem; color: var(--text-secondary); max-width: 360px; margin-bottom: 6px;">
-                                    Run one of the three Python scenario files from a separate VS Code terminal.
-                                </div>
-                                <div style="font-size: 0.78rem; color: var(--text-muted);">
-                                    Waiting for live workload registration...
+                                <div style="font-size: 0.82rem; color: var(--text-secondary); max-width: 340px;">
+                                    Start a scenario in a second terminal to see the live lock dependency graph.
                                 </div>
                             </div>
-                            <div class="graph-legend">
+                            <div class="graph-legend" id="graphLegend">
                                 <div class="graph-legend-item">
-                                    <span class="graph-legend-dot" style="background: var(--status-info);"></span> Process Node
+                                    <span class="graph-legend-dot" style="background: var(--status-info);"></span> Process
+                                </div>
+                                <div class="graph-legend-item" id="legendResourceItem">
+                                    <span class="graph-legend-dot" style="background: var(--accent-primary); border-radius: 3px;"></span> Lock
                                 </div>
                                 <div class="graph-legend-item">
-                                    <span class="graph-legend-dot" style="background: var(--accent-primary);"></span> Resource Node
+                                    <span class="graph-legend-dot" style="background: var(--status-danger);"></span> In Cycle
                                 </div>
                                 <div class="graph-legend-item">
-                                    <span class="graph-legend-dot" style="background: var(--status-danger);"></span> Deadlocked Cycle
+                                    <span class="graph-legend-dot" style="background: var(--status-warning);"></span> Stop Victim
                                 </div>
-                                <div class="graph-legend-item">
-                                    <span class="graph-legend-dot" style="background: var(--status-warning);"></span> Recommended Victim
+                                <div class="graph-legend-item" id="legendSolidArrow">
+                                    <span class="graph-legend-line"></span> Holds
+                                </div>
+                                <div class="graph-legend-item" id="legendDashedArrow">
+                                    <span class="graph-legend-line dashed"></span> Waiting For
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Live Detection Result Box -->
-                        <div id="wfgResultBox" style="margin-top: var(--space-md); padding: var(--space-md); border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default);">
-                            <div style="font-weight: 700; font-size: 0.88rem; margin-bottom: var(--space-xs);" id="wfgStatusTitle">
-                                Waiting for live workload registration...
+                        <!-- Plain-Language Detection Summary -->
+                        <div id="wfgResultBox" style="margin-top: var(--space-md); padding: 12px 14px; border-radius: var(--radius-sm); background: var(--bg-surface-alt); border: 1px solid var(--border-default);">
+                            <div style="font-weight: 700; font-size: 0.88rem; margin-bottom: 4px;" id="wfgStatusTitle">
+                                Waiting for a live workload...
                             </div>
-                            <div style="font-size: 0.82rem; color: var(--text-secondary);" id="wfgStatusDetail">
-                                No dummy graph is rendered. Start a live scenario file to stream real-time RAG/WFG cycle detection.
+                            <div style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.45;" id="wfgStatusDetail">
+                                The graph updates automatically as soon as a workload starts.
                             </div>
                         </div>
                     </div>
@@ -529,27 +544,34 @@
                                 LIVE BANKER'S ALGORITHM
                             </div>
                             <div class="btn-group">
-                                <span class="card-badge" id="bankerSnapshotBadge">Snapshot --</span>
+                                <span class="card-badge" id="bankerSnapshotBadge">v--</span>
                             </div>
                         </div>
                         <p class="card-desc">
-                            Computed live from declared Maximum Claims and actual Windows Named Mutex Allocations (<code>Need = Max &minus; Allocation</code>).
+                            Checks whether all active processes can finish without deadlocking (<code>Need = Max &minus; Holding</code>).
                         </p>
 
-                        <div style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary); margin-bottom: var(--space-sm);">
-                            Resources: <strong id="bankerResourcesList" style="color: var(--text-primary);">--</strong>
+                        <!-- Friendly Available Locks Strip -->
+                        <div style="margin-bottom: var(--space-sm); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;">
+                            <div style="font-size: 0.8rem; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <strong>Available Locks:</strong>
+                                <span id="bankerAvailableChips" class="dl-avail-chips"><span class="dl-chip dl-chip-muted">--</span></span>
+                            </div>
+                            <div style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">
+                                Vector: <strong id="bankerAvailableVec" style="color: var(--text-primary);">--</strong>
+                            </div>
                         </div>
 
-                        <!-- Live Matrices Display -->
+                        <!-- Live Matrices Table -->
                         <div class="banker-matrix" style="margin-bottom: var(--space-md);" id="bankerMatrixContainer">
                             <table id="bankerTable">
                                 <thead id="bankerTableHead">
                                     <tr>
                                         <th>Process</th>
-                                        <th>Allocation</th>
-                                        <th>Max Claim</th>
-                                        <th>Need</th>
-                                        <th>Finish</th>
+                                        <th>Holding</th>
+                                        <th>Max Need</th>
+                                        <th>Still Needs</th>
+                                        <th>Can Finish?</th>
                                     </tr>
                                 </thead>
                                 <tbody id="bankerTableBody">
@@ -562,12 +584,9 @@
                             </table>
                         </div>
 
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm); flex-wrap: wrap; gap: 8px;">
-                            <div style="font-family: var(--font-mono); font-size: 0.8rem;">
-                                Available Vector: <strong id="bankerAvailableVec" style="color: var(--accent-primary-hover);">--</strong>
-                            </div>
-                            <div style="font-family: var(--font-mono); font-size: 0.8rem;">
-                                Safe Sequence: <strong id="bankerSafeSeqInline">--</strong>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm); flex-wrap: wrap; gap: 8px; font-size: 0.82rem;">
+                            <div>
+                                <strong>Safe Completion Order:</strong> <span id="bankerSafeSeqInline" style="font-family: var(--font-mono);">--</span>
                             </div>
                         </div>
 
@@ -576,42 +595,42 @@
                     </div>
                 </div>
 
-                <!-- Separate Educational Simulation / Practice Section (Collapsed by Default — Never Affects Live View) -->
+                <!-- Separate Educational Practice Section (Collapsed by Default) -->
                 <details class="card" id="practiceDeadlockSection" style="margin-bottom: var(--space-lg);">
-                    <summary style="cursor: pointer; font-weight: 700; font-size: 0.9rem; color: var(--text-primary); padding: 4px 0;">
-                        Educational Simulation &amp; Practice Scenarios (Offline — Isolated from Live Monitor)
+                    <summary style="cursor: pointer; font-weight: 700; font-size: 0.88rem; color: var(--text-primary); padding: 4px 0;">
+                        Offline Practice Examples (Textbook WFG &amp; Banker's)
                     </summary>
                     <p class="card-desc" style="margin-top: var(--space-sm);">
-                        Static textbook WFG and Banker's Algorithm examples for offline study. Loading these scenarios never modifies the live monitor above.
+                        Static textbook examples for study only — these never affect the live monitor above.
                     </p>
                     <div class="grid-2" style="gap: var(--space-md); margin-top: var(--space-sm);">
                         <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-md); background: var(--bg-surface-alt);">
                             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-sm);">
-                                <strong style="font-size: 0.85rem;">Practice WFG Scenarios</strong>
+                                <strong style="font-size: 0.84rem;">Practice WFG</strong>
                                 <div class="btn-group">
                                     <select id="practiceWfgScenarioSelect" class="form-select form-select-sm">
-                                        <option value="circular_wait">Circular Wait (3 Procs, 3 Res)</option>
-                                        <option value="dining_philosophers">Dining Philosophers (5 Phil, 5 Forks)</option>
-                                        <option value="multi_resource">Multi-Resource Deadlock (4 Procs)</option>
-                                        <option value="no_deadlock">Safe Resource Flow (No Deadlock)</option>
+                                        <option value="circular_wait">Circular Wait (3 Procs)</option>
+                                        <option value="dining_philosophers">Dining Philosophers (5 Phil)</option>
+                                        <option value="multi_resource">Multi-Resource (4 Procs)</option>
+                                        <option value="no_deadlock">Safe Flow (No Deadlock)</option>
                                     </select>
-                                    <button class="btn btn-sm btn-primary" id="btnLoadPracticeWfg">Load Practice</button>
+                                    <button class="btn btn-sm btn-primary" id="btnLoadPracticeWfg">Load</button>
                                 </div>
                             </div>
-                            <div id="practiceWfgOutput" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary);">
-                                Select a practice scenario and click "Load Practice" to inspect its textbook cycle &amp; victim calculation.
+                            <div id="practiceWfgOutput" style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5;">
+                                Choose a textbook example and click Load.
                             </div>
                         </div>
                         <div style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-md); background: var(--bg-surface-alt);">
                             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: var(--space-sm);">
-                                <strong style="font-size: 0.85rem;">Practice Banker's Scenarios</strong>
+                                <strong style="font-size: 0.84rem;">Practice Banker's</strong>
                                 <div class="btn-group">
                                     <button class="btn btn-sm" id="btnPracticeBankerSafe">Safe Example</button>
                                     <button class="btn btn-sm" id="btnPracticeBankerUnsafe">Unsafe Example</button>
                                 </div>
                             </div>
-                            <div id="practiceBankerOutput" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary);">
-                                Click "Safe Example" or "Unsafe Example" to inspect textbook Banker's matrices offline.
+                            <div id="practiceBankerOutput" style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5;">
+                                Click Safe or Unsafe Example to view a static Banker's calculation.
                             </div>
                         </div>
                     </div>

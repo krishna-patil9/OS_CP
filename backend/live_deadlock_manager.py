@@ -48,14 +48,19 @@ DEFAULT_JOB_MEMORY_LIMIT_MB = 512
 DEFAULT_PER_PROCESS_MEMORY_LIMIT_MB = 256
 DEFAULT_MAX_ACTIVE_PROCESSES = 4
 DEFAULT_MAX_RUNTIME_SECONDS = 120
+DEFAULT_RECOVERY_AUTH_TTL_SECONDS = 30
 
 
 class LiveAuthError(PermissionError):
-    """Raised when per-run token authentication fails."""
+    """Raised when per-run or recovery token authentication fails (HTTP 401)."""
+
+
+class LiveConflictError(RuntimeError):
+    """Raised when live deadlock state/snapshot/worker/sandbox changed before action (HTTP 409)."""
 
 
 class LiveValidationError(ValueError):
-    """Raised when a registration, matrix invariant, or sync event transition is invalid."""
+    """Raised when a registration, matrix invariant, or sync event transition is invalid (HTTP 400)."""
 
 
 @dataclass
@@ -131,7 +136,8 @@ class LiveDeadlockRun:
     recovery_history: List[dict] = field(default_factory=list)
     recovery_outcome: Optional[str] = None          # selective_recovery_verified | watchdog_emergency_cleanup | aborted | completed_without_deadlock
     selective_recovery_succeeded: bool = False
-    approval_challenge: Optional[dict] = None       # {token, sandbox_name, worker_id, pid, create_time_100ns, issued_at}
+    approval_challenge: Optional[dict] = None       # Current active deadlock-bound recovery authorization
+    recovery_authorizations: Dict[str, dict] = field(default_factory=dict)  # token -> authorization record (single-use, TTL, never logged)
     snapshot_version: int = 0
     updated_at: float = 0.0
     last_snapshot: Optional[dict] = None
@@ -173,6 +179,25 @@ class LiveDeadlockManager:
         if not provided_token or not hmac.compare_digest(run.run_token, provided_token):
             raise LiveAuthError("Invalid or missing per-run authentication token (X-Run-Token)")
 
+    def _invalidate_recovery_authorizations_locked(self, run: LiveDeadlockRun, reason: str):
+        """Invalidate all unused recovery authorizations for this run (e.g. cycle/snapshot changed or run ended)."""
+        run.approval_challenge = None
+        for rec in run.recovery_authorizations.values():
+            if not rec.get("used") and not rec.get("invalidated"):
+                rec["invalidated"] = True
+                rec["invalidation_reason"] = reason
+
+    def _token_belongs_to_other_run_locked(self, current_run_id: str, token: str) -> bool:
+        for other_id, other_run in self._runs.items():
+            if other_id == current_run_id:
+                continue
+            if hmac.compare_digest(other_run.run_token, token):
+                return True
+            for other_tok in other_run.recovery_authorizations:
+                if hmac.compare_digest(other_tok, token):
+                    return True
+        return False
+
     def _verify_recovery_auth_locked(
         self,
         run: LiveDeadlockRun,
@@ -181,25 +206,73 @@ class LiveDeadlockManager:
         sandbox_name: str,
         pid: int,
         create_time_100ns: int,
-    ):
-        # Accept either the secret per-run token OR the active deadlock-bound recovery challenge token
-        if run_token and hmac.compare_digest(run.run_token, run_token):
-            return "run_token"
+        snapshot_version: Optional[int] = None,
+        deadlock_cycle: Optional[List[str]] = None,
+    ) -> Tuple[str, Optional[dict]]:
+        """
+        Validate recovery authorization via either:
+          1. Secret per-run workload token (X-Run-Token), OR
+          2. Short-lived, single-use, deadlock-bound recovery token (X-Recovery-Token)
 
-        challenge = run.approval_challenge
-        if (
-            recovery_token
-            and challenge
-            and hmac.compare_digest(challenge["token"], recovery_token)
-            and challenge["sandbox_name"] == sandbox_name
-            and challenge["pid"] == pid
-            and challenge["create_time_100ns"] == create_time_100ns
-        ):
-            return "recovery_challenge_token"
+        Enforces exact binding to run_id, sandbox_name, victim pid, exact 64-bit
+        create_time_100ns, snapshot_version, deadlock_cycle, expiry, and single-use.
+        Never exposes raw token values in errors or logs.
+        """
+        has_run_tok = bool(run_token and run_token.strip())
+        has_rec_tok = bool(recovery_token and recovery_token.strip())
 
-        raise LiveAuthError(
-            "Recovery rejected: valid X-Run-Token or deadlock-bound X-Recovery-Token is required"
-        )
+        if not has_run_tok and not has_rec_tok:
+            raise LiveAuthError("Recovery authorization required")
+
+        # 1. Check X-Run-Token if provided
+        if has_run_tok:
+            tok = run_token.strip()
+            if hmac.compare_digest(run.run_token, tok):
+                return "run_token", None
+            if self._token_belongs_to_other_run_locked(run.run_id, tok):
+                raise PermissionError("Authorization does not match this workload")
+            raise LiveAuthError("Invalid recovery authorization")
+
+        # 2. Check deadlock-bound X-Recovery-Token
+        tok = recovery_token.strip()
+        matched_rec: Optional[dict] = None
+        for stored_tok, rec in run.recovery_authorizations.items():
+            if hmac.compare_digest(stored_tok, tok):
+                matched_rec = rec
+                break
+
+        if matched_rec is None:
+            if self._token_belongs_to_other_run_locked(run.run_id, tok):
+                raise PermissionError("Authorization does not match this workload")
+            raise LiveAuthError("Invalid recovery authorization")
+
+        if matched_rec.get("used"):
+            raise LiveAuthError("Recovery authorization has already been used")
+
+        now = time.time()
+        if now > float(matched_rec.get("expires_at", 0.0)):
+            raise LiveAuthError("Recovery authorization expired")
+
+        if matched_rec.get("invalidated"):
+            raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+        if matched_rec["run_id"] != run.run_id or matched_rec["sandbox_name"] != sandbox_name:
+            raise PermissionError("Authorization does not match this workload")
+
+        if matched_rec["pid"] != pid or matched_rec["create_time_100ns"] != create_time_100ns:
+            raise PermissionError("Selected process is no longer eligible")
+
+        # Validate bound snapshot_version & deadlock_cycle against current live state
+        if snapshot_version is not None and int(snapshot_version) != int(matched_rec["snapshot_version"]):
+            raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+        if int(matched_rec["snapshot_version"]) != int(run.snapshot_version):
+            raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+        if deadlock_cycle is not None and list(deadlock_cycle) != list(matched_rec["deadlock_cycle"]):
+            raise LiveConflictError("Deadlock state changed; refresh analysis")
+
+        return "recovery_authorization_token", matched_rec
 
     # ── 1. Run Registration & Fail-Closed Containment ─────────────────────
 
