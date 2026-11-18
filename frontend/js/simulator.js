@@ -20,15 +20,15 @@ const Simulator = (() => {
 
         if (btnRunMlfq) {
             btnRunMlfq.addEventListener('click', () => {
-                setButtonLoading(btnRunMlfq, true, '▶️ Run MLFQ Simulation');
-                runMlfqDemo().finally(() => setButtonLoading(btnRunMlfq, false, '▶️ Run MLFQ Simulation'));
+                setButtonLoading(btnRunMlfq, true, 'Run MLFQ Simulation');
+                runMlfqDemo().finally(() => setButtonLoading(btnRunMlfq, false, 'Run MLFQ Simulation'));
             });
         }
 
         if (btnRunPage) {
             btnRunPage.addEventListener('click', () => {
-                setButtonLoading(btnRunPage, true, '▶️ Compare All Algorithms');
-                runPageReplacementSim().finally(() => setButtonLoading(btnRunPage, false, '▶️ Compare All Algorithms'));
+                setButtonLoading(btnRunPage, true, 'Compare All Algorithms');
+                runPageReplacementSim().finally(() => setButtonLoading(btnRunPage, false, 'Compare All Algorithms'));
             });
         }
 
@@ -54,7 +54,7 @@ const Simulator = (() => {
         if (!btn) return;
         if (loading) {
             btn.disabled = true;
-            btn.innerHTML = '<span style="opacity:0.7">⏳ Running...</span>';
+            btn.innerHTML = '<span style="opacity:0.75">Running...</span>';
         } else {
             btn.disabled = false;
             btn.innerHTML = originalText;
@@ -97,7 +97,7 @@ const Simulator = (() => {
     async function runMlfqDemo() {
         const ganttContainer = document.getElementById('mlfqGanttContainer');
         if (ganttContainer) {
-            ganttContainer.innerHTML = '<div style="color: var(--text-muted); font-size:0.75rem; padding: var(--space-sm);">⏳ Running MLFQ simulation...</div>';
+            ganttContainer.innerHTML = '<div style="color: var(--text-muted); font-size:0.78rem; padding: var(--space-sm);">Running MLFQ simulation...</div>';
         }
 
         try {
@@ -111,20 +111,20 @@ const Simulator = (() => {
 
             const data = await res.json();
             renderMlfqResults(data);
-            if (typeof App !== 'undefined') App.showToast('✅ MLFQ simulation completed!', 'success');
+            if (typeof App !== 'undefined') App.showToast('MLFQ simulation completed', 'success');
 
         } catch (e) {
             console.error('[Simulator] MLFQ fetch failed:', e);
             showSimError(ganttContainer, 'Cannot reach server. Is python run_server.py running?');
-            if (typeof App !== 'undefined') App.showToast('❌ Cannot reach server — restart run_server.py', 'error');
+            if (typeof App !== 'undefined') App.showToast('Cannot reach server — restart run_server.py', 'error');
         }
     }
 
     function showSimError(container, message) {
         if (!container) return;
         container.innerHTML = `
-            <div style="color: var(--accent-rose); font-size:0.8rem; padding: var(--space-md); background: rgba(244,63,94,0.08); border: 1px solid rgba(244,63,94,0.3); border-radius: 8px; font-family: var(--font-mono);">
-                ⚠️ ${escapeHtml(message)}
+            <div style="color: var(--status-danger-text); font-size:0.82rem; padding: var(--space-md); background: var(--status-danger-bg); border: 1px solid var(--status-danger); border-radius: 6px; font-family: var(--font-mono);">
+                ${escapeHtml(message)}
             </div>`;
     }
 
@@ -169,12 +169,12 @@ const Simulator = (() => {
 
                 html += `
                     <tr>
-                        <td style="font-weight:700;color:var(--accent-indigo)">${escapeHtml(p.id)}</td>
+                        <td style="font-weight:700;color:var(--accent-hover)">${escapeHtml(p.id)}</td>
                         <td style="color:var(--text-primary);font-weight:600">${escapeHtml(p.name)}</td>
                         <td>${p.total_burst} ms</td>
                         <td>${p.completion_time !== undefined ? p.completion_time : '-'} ms</td>
-                        <td style="color:var(--accent-cyan);font-weight:600">${tat} ms</td>
-                        <td style="color:var(--accent-amber);font-weight:600">${wt} ms</td>
+                        <td style="color:var(--status-info-text);font-weight:600">${tat} ms</td>
+                        <td style="color:var(--status-warning-text);font-weight:600">${wt} ms</td>
                     </tr>`;
             }
 
@@ -182,10 +182,10 @@ const Simulator = (() => {
             const avgWt  = metrics.avg_wait_time || metrics.avg_waiting_time || 0;
 
             html += `
-                <tr style="background:rgba(255,255,255,0.04);font-weight:700;border-top:1px solid var(--border-glass)">
+                <tr style="background:var(--bg-surface-alt);font-weight:700;border-top:1px solid var(--border-default)">
                     <td colspan="4" style="text-align:right;color:var(--text-secondary)">Averages:</td>
-                    <td style="color:var(--accent-cyan)">Avg TAT: ${Number(avgTat).toFixed(1)} ms</td>
-                    <td style="color:var(--accent-amber)">Avg WT: ${Number(avgWt).toFixed(1)} ms</td>
+                    <td style="color:var(--status-info-text)">Avg TAT: ${Number(avgTat).toFixed(1)} ms</td>
+                    <td style="color:var(--status-warning-text)">Avg WT: ${Number(avgWt).toFixed(1)} ms</td>
                 </tr>`;
 
             tbody.innerHTML = html;
@@ -194,11 +194,11 @@ const Simulator = (() => {
 
     function renderQueueChips(processes, queueIdx) {
         const colors = {
-            'P1': '#6366f1',
-            'P2': '#06b6d4',
-            'P3': '#10b981',
-            'P4': '#f59e0b',
-            'P5': '#f43f5e'
+            'P1': '#21777B',
+            'P2': '#2C485C',
+            'P3': '#215940',
+            'P4': '#6E490D',
+            'P5': '#7E2B2B'
         };
 
         // Show processes whose final resting queue matches this level
@@ -208,29 +208,29 @@ const Simulator = (() => {
         });
 
         if (inQueue.length === 0) {
-            return '<span style="color:var(--text-muted);font-size:0.75rem;font-style:italic">No processes at this level</span>';
+            return '<span style="color:var(--text-muted);font-size:0.78rem;font-style:italic">No processes at this level</span>';
         }
 
         return inQueue.map(p => {
-            const color = colors[p.id] || '#6366f1';
-            const done  = p.completion_time > 0 ? 'Completed ✓' : 'Active';
-            const doneColor = p.completion_time > 0 ? 'var(--accent-emerald)' : 'var(--accent-amber)';
+            const color = colors[p.id] || '#21777B';
+            const done  = p.completion_time > 0 ? 'Completed' : 'Active';
+            const doneColor = p.completion_time > 0 ? 'var(--status-success-text)' : 'var(--status-warning-text)';
             return `
-                <span class="mlfq-proc-chip" style="border:1px solid ${color}88;color:${color};background:${color}15;display:inline-flex;align-items:center;gap:6px">
+                <span class="mlfq-proc-chip" style="border:1px solid ${color}66;color:${color};background:${color}14;display:inline-flex;align-items:center;gap:6px">
                     <strong>${escapeHtml(p.id)}</strong>
                     <span>${escapeHtml(p.name)}</span>
-                    <span style="font-size:0.65rem;background:${color}33;padding:1px 5px;border-radius:4px">${p.total_burst}ms</span>
-                    <span style="font-size:0.65rem;color:${doneColor};font-weight:600">${done}</span>
+                    <span style="font-size:0.7rem;background:${color}22;padding:1px 5px;border-radius:4px">${p.total_burst}ms</span>
+                    <span style="font-size:0.7rem;color:${doneColor};font-weight:600">${done}</span>
                 </span>`;
         }).join('\n');
     }
 
     function renderGanttChart(container, gantt, processes) {
         const procColorMap = {
-            'P1': '#6366f1', 'P2': '#06b6d4', 'P3': '#10b981',
-            'P4': '#f59e0b', 'P5': '#f43f5e'
+            'P1': '#21777B', 'P2': '#2C485C', 'P3': '#215940',
+            'P4': '#6E490D', 'P5': '#7E2B2B'
         };
-        const palette = ['#6366f1', '#06b6d4', '#10b981', '#f59e0b', '#f43f5e', '#8b5cf6'];
+        const palette = ['#21777B', '#2C485C', '#215940', '#6E490D', '#7E2B2B', '#5B2C8C'];
         processes.forEach((p, idx) => {
             if (!procColorMap[p.id]) procColorMap[p.id] = palette[idx % palette.length];
         });
@@ -278,12 +278,12 @@ const Simulator = (() => {
         const refString = rawStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
 
         if (refString.length === 0) {
-            if (typeof App !== 'undefined') App.showToast('⚠️ Enter a valid comma-separated reference string', 'warning');
+            if (typeof App !== 'undefined') App.showToast('Enter a valid comma-separated reference string', 'warning');
             return;
         }
 
         if (matrixEl) {
-            matrixEl.innerHTML = '<div style="color:var(--text-muted);font-size:0.75rem;padding:var(--space-md);text-align:center">⏳ Running comparison...</div>';
+            matrixEl.innerHTML = '<div style="color:var(--text-muted);font-size:0.78rem;padding:var(--space-md);text-align:center">Running comparison...</div>';
         }
 
         try {
@@ -304,7 +304,7 @@ const Simulator = (() => {
             lastPageData = data;
             renderPageReplacementResults(data);
             renderPageTraceTable(data, selectedAlgo);
-            if (typeof App !== 'undefined') App.showToast('✅ Page replacement comparison done!', 'success');
+            if (typeof App !== 'undefined') App.showToast('Page replacement comparison complete', 'success');
 
             // Make the card visible and scroll to it
             const card = document.getElementById('cardPageReplacement');
@@ -316,7 +316,7 @@ const Simulator = (() => {
         } catch (e) {
             console.error('[Simulator] Page replacement fetch failed:', e);
             showSimError(matrixEl, 'Cannot reach server. Is python run_server.py running?');
-            if (typeof App !== 'undefined') App.showToast('❌ Cannot reach server — restart run_server.py', 'error');
+            if (typeof App !== 'undefined') App.showToast('Cannot reach server — restart run_server.py', 'error');
         }
     }
 
@@ -455,7 +455,7 @@ const Simulator = (() => {
         html += '<tr><td class="row-label">Evicted</td>';
         for (const ev of events) {
             const ev_page = (ev.page_evicted !== null && ev.page_evicted !== undefined);
-            html += `<td style="font-size:0.7rem;${ev_page ? 'color:var(--accent-rose);font-weight:600' : 'color:var(--text-muted)'}">
+            html += `<td style="font-size:0.74rem;${ev_page ? 'color:var(--status-danger-text);font-weight:600' : 'color:var(--text-muted)'}">
                 ${ev_page ? `Pg ${ev.page_evicted}` : '–'}</td>`;
         }
         html += '</tr>';
@@ -472,10 +472,10 @@ const Simulator = (() => {
         html += `
             <div style="display:flex;gap:var(--space-lg);justify-content:flex-end;align-items:center;
                         margin-top:var(--space-sm);padding:var(--space-xs) var(--space-sm);
-                        font-family:var(--font-mono);font-size:0.75rem">
+                        font-family:var(--font-mono);font-size:0.78rem">
                 <span style="color:var(--text-secondary)">Total Refs: <strong>${total}</strong></span>
-                <span style="color:var(--accent-emerald)">Hits: <strong>${hits}</strong> (${hitRate}%)</span>
-                <span style="color:var(--accent-rose)">Faults: <strong>${faults}</strong> (${faultRate}%)</span>
+                <span style="color:var(--status-success-text)">Hits: <strong>${hits}</strong> (${hitRate}%)</span>
+                <span style="color:var(--status-danger-text)">Faults: <strong>${faults}</strong> (${faultRate}%)</span>
             </div>`;
 
         container.innerHTML = html;

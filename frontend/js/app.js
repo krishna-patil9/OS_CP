@@ -89,8 +89,8 @@ const App = (() => {
                 setExecutionMode(data.mode);
                 showToast(
                     data.mode === 'normal'
-                        ? '🛡️ Returned to Normal Mode (Lightweight & Safe)'
-                        : '🧪 Testing Mode Active (OS Workloads Unlocked)',
+                        ? 'Returned to Normal Mode (Lightweight & Safe)'
+                        : 'Testing Mode Active (OS Workloads Unlocked)',
                     data.mode === 'normal' ? 'info' : 'warning'
                 );
             }
@@ -107,16 +107,16 @@ const App = (() => {
 
         if (badge) {
             badge.className = `mode-badge ${mode}`;
-            badge.textContent = mode === 'normal' ? '🛡️ Normal Mode' : '🧪 Testing Mode';
+            badge.textContent = mode === 'normal' ? 'Normal Mode' : 'Testing Mode';
         }
 
         if (btnToggle) {
-            btnToggle.textContent = mode === 'normal' ? '⚡ Activate Testing Mode' : '🛡️ Return to Normal Mode';
+            btnToggle.textContent = mode === 'normal' ? 'Activate Testing Mode' : 'Return to Normal Mode';
             btnToggle.className = mode === 'normal' ? 'btn btn-sm btn-outline' : 'btn btn-sm btn-primary';
         }
 
         if (lockBanner) {
-            lockBanner.style.display = mode === 'normal' ? 'block' : 'none';
+            lockBanner.style.display = mode === 'normal' ? 'flex' : 'none';
         }
     }
 
@@ -222,6 +222,14 @@ const App = (() => {
                         if (typeof Isolation !== 'undefined' && data.sandboxes) {
                             Isolation.updateFromTelemetry(data.sandboxes);
                         }
+                        // Update live deadlock monitor if present
+                        if (typeof DeadlockGraph !== 'undefined' && DeadlockGraph.updateFromTelemetry && data.live_deadlock) {
+                            DeadlockGraph.updateFromTelemetry(data.live_deadlock);
+                        }
+                    } else if (data.type === 'live_deadlock_update') {
+                        if (typeof DeadlockGraph !== 'undefined' && DeadlockGraph.handleLiveSnapshotPush) {
+                            DeadlockGraph.handleLiveSnapshotPush(data);
+                        }
                     }
                 } catch (e) {
                     console.error('[WebSocket] Failed to parse message:', e);
@@ -272,13 +280,13 @@ const App = (() => {
         toast.className = `toast ${type}`;
 
         const icons = {
-            success: '✅',
-            error: '❌',
-            warning: '⚠️',
-            info: 'ℹ️'
+            success: '<svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--status-success-text);fill:none;stroke-width:2.2;flex-shrink:0;"><polyline points="20 6 9 17 4 12"></polyline></svg>',
+            error: '<svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--status-danger-text);fill:none;stroke-width:2.2;flex-shrink:0;"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>',
+            warning: '<svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--status-warning-text);fill:none;stroke-width:2.2;flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
+            info: '<svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:var(--accent-hover);fill:none;stroke-width:2.2;flex-shrink:0;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>'
         };
 
-        toast.innerHTML = `<span style="margin-right: 6px;">${icons[type] || 'ℹ️'}</span>${escapeHtml(message)}`;
+        toast.innerHTML = `<span style="display:inline-flex;align-items:center;margin-right:8px;" aria-hidden="true">${icons[type] || icons.info}</span><span>${escapeHtml(message)}</span>`;
         container.appendChild(toast);
 
         setTimeout(() => {

@@ -162,7 +162,7 @@ const Workloads = (() => {
     async function launchDeadlockDemo() {
         if (!checkTestingMode()) return;
 
-        if (!confirm('Launch synthetic Mutex Deadlock demonstration (2 threads, circular wait, 15s watchdog timeout)?')) {
+        if (!confirm('Launch live Windows-native Mutex Deadlock demo (Supervisor + 2 child worker processes in a dedicated Windows Job Object, 120s watchdog)?')) {
             return;
         }
 
@@ -172,13 +172,13 @@ const Workloads = (() => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     workload_type: 'deadlock_demo',
-                    args: ['--workers', '2', '--delay', '0.5', '--timeout', '15']
+                    args: ['--workers', '2', '--delay', '0.4', '--timeout', '120']
                 })
             });
 
             if (res.ok) {
                 const data = await res.json();
-                App.showToast(`Launched Deadlock Demo (PID ${data.pid}) with mutex order inversion!`, 'warning');
+                App.showToast(`Launched Live Deadlock Demo (Supervisor PID ${data.pid}) — switch to Deadlock tab to monitor & approve recovery.`, 'warning');
                 fetchWorkloads();
             } else {
                 const err = await res.json();
@@ -289,19 +289,19 @@ const Workloads = (() => {
         let html = '';
         for (const w of workloads) {
             const isRunning = w.running;
-            const statusBadge = isRunning 
-                ? '<span style="color: var(--accent-emerald); font-weight: 700;">🟢 RUNNING</span>'
-                : `<span style="color: var(--text-muted);">⚪ EXITED (${w.return_code})</span>`;
+            const statusBadge = isRunning
+                ? '<span class="priority-badge normal">RUNNING</span>'
+                : `<span class="priority-badge idle">EXITED (${w.return_code})</span>`;
 
             html += `
                 <tr>
-                    <td style="font-weight: 600; color: var(--accent-indigo);">${escapeHtml(w.workload_id)}</td>
+                    <td style="font-weight: 600; color: var(--accent-primary-hover);">${escapeHtml(w.workload_id)}</td>
                     <td class="pid-cell">${w.pid}</td>
                     <td>${statusBadge}</td>
                     <td style="font-family: var(--font-mono);">${w.return_code !== null ? w.return_code : '-'}</td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick="Workloads.stopWorkload('${escapeHtml(w.workload_id)}')">
-                            🛑 Stop
+                            Stop
                         </button>
                     </td>
                 </tr>

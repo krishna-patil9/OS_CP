@@ -114,7 +114,8 @@ def main():
     finally:
         # Extra safety fallback to ensure all workloads & sandboxes are cleaned up
         try:
-            from backend.main import spawned_workloads, kill_process_tree, isolation, monitor, policy
+            from backend.main import spawned_workloads, kill_process_tree, isolation, monitor, policy, live_deadlock
+            live_deadlock.cleanup_all()
             for wid, proc in list(spawned_workloads.items()):
                 kill_process_tree(proc.pid)
             isolation.cleanup_all_sandboxes()

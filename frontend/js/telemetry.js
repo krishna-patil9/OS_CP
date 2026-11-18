@@ -38,8 +38,8 @@ const Telemetry = (() => {
         window.addEventListener('resize', () => {
             if (cpuCanvas) resizeCanvas(cpuCanvas);
             if (memCanvas) resizeCanvas(memCanvas);
-            drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
-            drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
+            drawChart(cpuCanvas, cpuCtx, cpuHistory, '#21777B', 'CPU %');
+            drawChart(memCanvas, memCtx, memHistory, '#52748D', 'RAM %');
         });
 
         // Search & Filter event listeners
@@ -56,7 +56,7 @@ const Telemetry = (() => {
         if (btnPause) {
             btnPause.addEventListener('click', () => {
                 isPaused = !isPaused;
-                btnPause.textContent = isPaused ? '▶️ Resume' : '⏸️ Pause';
+                btnPause.textContent = isPaused ? 'Resume' : 'Pause';
                 btnPause.classList.toggle('btn-primary', isPaused);
                 App.showToast(isPaused ? 'Telemetry feed paused' : 'Telemetry feed resumed', 'info');
             });
@@ -81,11 +81,24 @@ const Telemetry = (() => {
     function resizeCanvas(canvas) {
         if (!canvas || !canvas.parentElement) return;
         const rect = canvas.parentElement.getBoundingClientRect();
-        const w = Math.floor(rect.width) || 300;
-        const h = Math.floor(rect.height) || 180;
-        if (canvas.width !== w || canvas.height !== h) {
-            canvas.width = w;
-            canvas.height = h;
+        const cssWidth = Math.floor(rect.width) || 300;
+        const cssHeight = Math.floor(rect.height) || 180;
+        const dpr = window.devicePixelRatio || 1;
+
+        canvas.style.width = cssWidth + 'px';
+        canvas.style.height = cssHeight + 'px';
+
+        const targetWidth = Math.floor(cssWidth * dpr);
+        const targetHeight = Math.floor(cssHeight * dpr);
+
+        if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+        }
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         }
     }
 
@@ -97,8 +110,8 @@ const Telemetry = (() => {
     function onTabActivated() {
         if (cpuCanvas) resizeCanvas(cpuCanvas);
         if (memCanvas) resizeCanvas(memCanvas);
-        drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
-        drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
+        drawChart(cpuCanvas, cpuCtx, cpuHistory, '#21777B', 'CPU %');
+        drawChart(memCanvas, memCtx, memHistory, '#52748D', 'RAM %');
         renderProcessTable();
         renderDecisionFeed();
     }
@@ -144,7 +157,7 @@ const Telemetry = (() => {
             cpuHistory.push(cpuPercent);
             if (cpuHistory.length > MAX_POINTS) cpuHistory.shift();
             if (visible) {
-                drawChart(cpuCanvas, cpuCtx, cpuHistory, '#6366f1', 'CPU %');
+                drawChart(cpuCanvas, cpuCtx, cpuHistory, '#21777B', 'CPU %');
             }
 
             const mem = system.memory || {};
@@ -170,7 +183,7 @@ const Telemetry = (() => {
             memHistory.push(memPercent);
             if (memHistory.length > MAX_POINTS) memHistory.shift();
             if (visible) {
-                drawChart(memCanvas, memCtx, memHistory, '#06b6d4', 'RAM %');
+                drawChart(memCanvas, memCtx, memHistory, '#52748D', 'RAM %');
             }
 
             const totalProcs = (system.process_counts && system.process_counts.total)
@@ -215,8 +228,8 @@ const Telemetry = (() => {
 
         // Filter by search
         if (search) {
-            list = list.filter(p => 
-                p.name.toLowerCase().includes(search) || 
+            list = list.filter(p =>
+                p.name.toLowerCase().includes(search) ||
                 String(p.pid).includes(search)
             );
         }
@@ -261,8 +274,8 @@ const Telemetry = (() => {
             const prioClass = (p.priority_class || 'normal').toLowerCase();
             const cat = p.category || 'background';
 
-            const sandboxTag = p.sandbox_name 
-                ? `<span class="sandbox-pid-tag">${escapeHtml(p.sandbox_name)}</span>` 
+            const sandboxTag = p.sandbox_name
+                ? `<span class="sandbox-pid-tag">${escapeHtml(p.sandbox_name)}</span>`
                 : `<span style="color: var(--text-muted); font-size: 0.72rem;">Native</span>`;
 
             html += `
@@ -279,9 +292,15 @@ const Telemetry = (() => {
                     <td>${sandboxTag}</td>
                     <td>
                         <div class="action-cell">
-                            <button class="action-btn" title="Trim Working Set (RAM)" onclick="Telemetry.trimProcess(${p.pid})">✂️</button>
-                            <button class="action-btn" title="Set to IDLE Priority" onclick="Telemetry.setPriority(${p.pid}, 'IDLE_PRIORITY_CLASS')">⬇️</button>
-                            <button class="action-btn danger" title="Terminate Process" onclick="Telemetry.terminateProcess(${p.pid})">❌</button>
+                            <button class="action-btn" title="Trim Working Set (RAM)" onclick="Telemetry.trimProcess(${p.pid})">
+                                <svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><line x1="20" y1="4" x2="8.12" y2="15.88"></line><line x1="14.47" y1="14.48" x2="20" y2="20"></line></svg>
+                            </button>
+                            <button class="action-btn" title="Set to IDLE Priority" onclick="Telemetry.setPriority(${p.pid}, 'IDLE_PRIORITY_CLASS')">
+                                <svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+                            </button>
+                            <button class="action-btn danger" title="Terminate Process" onclick="Telemetry.terminateProcess(${p.pid})">
+                                <svg viewBox="0 0 24 24" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                            </button>
                         </div>
                     </td>
                 </tr>
@@ -298,7 +317,9 @@ const Telemetry = (() => {
         if (!cachedDecisions || cachedDecisions.length === 0) {
             container.innerHTML = `
                 <div class="empty-state">
-                    <div class="empty-state-icon">🛡️</div>
+                    <div class="empty-state-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" style="width:32px;height:32px;stroke:currentColor;fill:none;stroke-width:1.75;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                    </div>
                     <div class="empty-state-text">No policy actions triggered yet. System running smoothly.</div>
                 </div>
             `;
@@ -331,13 +352,13 @@ const Telemetry = (() => {
 
         resizeCanvas(canvas);
 
-        const w = canvas.width;
-        const h = canvas.height;
+        const w = parseFloat(canvas.style.width) || canvas.width / (window.devicePixelRatio || 1);
+        const h = parseFloat(canvas.style.height) || canvas.height / (window.devicePixelRatio || 1);
 
         ctx.clearRect(0, 0, w, h);
 
-        // Background subtle grid lines
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        // Background subtle warm gray grid lines
+        ctx.strokeStyle = 'rgba(50, 48, 53, 0.1)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         for (let y = 0; y <= h; y += h / 4) {
@@ -347,7 +368,7 @@ const Telemetry = (() => {
         ctx.stroke();
 
         if (!data || data.length === 0) {
-            ctx.fillStyle = '#64748b';
+            ctx.fillStyle = '#625D62';
             ctx.font = '12px "Inter", sans-serif';
             ctx.textAlign = 'center';
             ctx.fillText('Awaiting telemetry stream...', w / 2, h / 2);
@@ -362,8 +383,8 @@ const Telemetry = (() => {
 
         // Create gradient fill
         const grad = ctx.createLinearGradient(0, 0, 0, h);
-        grad.addColorStop(0, color + '55');
-        grad.addColorStop(1, color + '05');
+        grad.addColorStop(0, color + '25');
+        grad.addColorStop(1, color + '03');
 
         // Path
         ctx.beginPath();
@@ -377,7 +398,7 @@ const Telemetry = (() => {
 
         // Stroke line
         ctx.strokeStyle = color;
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 2.2;
         ctx.lineJoin = 'round';
         ctx.stroke();
 
@@ -388,9 +409,9 @@ const Telemetry = (() => {
         ctx.fillStyle = grad;
         ctx.fill();
 
-        // Current value readout badge
+        // Current value readout badge (Deep Charcoal text for high contrast on light canvas)
         const lastVal = points[points.length - 1];
-        ctx.fillStyle = '#f1f5f9';
+        ctx.fillStyle = '#323035';
         ctx.font = 'bold 11px "JetBrains Mono", monospace';
         ctx.textAlign = 'right';
         ctx.fillText(`${label}: ${lastVal.toFixed(1)}%`, w - 10, 18);

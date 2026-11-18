@@ -1,0 +1,57 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution & packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Coverage & test reports
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Frontend / Node tooling artifacts
+node_modules/
+frontend/package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs & runtime temp files
+*.log
+logs/
+*.pid
+*.tmp
+*.dmp
+
+# IDEs & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-generated files
+Thumbs.db
+desktop.ini
+.DS_Store
+._*

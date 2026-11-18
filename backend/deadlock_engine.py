@@ -50,6 +50,14 @@ class ProcessNode:
     allocated: Dict[str, int] = field(default_factory=dict)   # resource_id -> count
     requesting: Dict[str, int] = field(default_factory=dict)  # resource_id -> count
     max_claim: Dict[str, int] = field(default_factory=dict)   # resource_id -> max count
+    recovery_priority: Optional[int] = None                   # Application recovery priority (1 = lowest/first victim)
+    os_scheduling_priority: Optional[str] = None              # Windows OS scheduling priority class (separate concept)
+    pid: Optional[int] = None
+    tid: Optional[int] = None
+    create_time_100ns: Optional[int] = None
+    role: str = "worker"                                      # "worker" or "supervisor"
+    eligible_for_victim: bool = True
+    state: str = "running"
 
 
 @dataclass
@@ -71,6 +79,9 @@ class DeadlockResult:
     recommended_victim: Optional[str]
     victim_reason: str = ""
     timestamp: float = 0.0
+    detection_method: str = "dfs_wfg"
+    is_multi_instance_graph: bool = False
+    multi_instance_deadlocked: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -85,6 +96,7 @@ class BankerResult:
     process_names: List[str]
     resource_names: List[str]
     timestamp: float = 0.0
+    finish_flags: List[bool] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -200,66 +212,161 @@ class WaitForGraph:
 
         return cycles
 
+    def detect_multi_instance_deadlock(self) -> List[str]:
+        """
+        Multi-instance deadlock detection via matrix reduction (Silberschatz / Coffman).
+
+        Uses current Available, Allocation, and Request vectors (NOT Max claims —
+        Banker's Algorithm is separate). Iteratively marks processes whose current
+        Request[i] <= Work as finishable and releases their Allocation[i] into Work.
+        Any remaining unfinished processes are genuinely deadlocked.
+        """
+        proc_ids = list(self.processes.keys())
+        res_ids = list(self.resources.keys())
+        if not proc_ids or not res_ids:
+            return []
+
+        work = [int(self.resources[r].available_instances or 0) for r in res_ids]
+        alloc = [
+            [int(self.processes[p].allocated.get(r, 0)) for r in res_ids]
+            for p in proc_ids
+        ]
+        req = [
+            [int(self.processes[p].requesting.get(r, 0)) for r in res_ids]
+            for p in proc_ids
+        ]
+
+        n = len(proc_ids)
+        m = len(res_ids)
+        finish = [
+            all(alloc[i][j] == 0 for j in range(m)) and all(req[i][j] == 0 for j in range(m))
+            for i in range(n)
+        ]
+
+        while True:
+            progressed = False
+            for i in range(n):
+                if finish[i]:
+                    continue
+                if all(req[i][j] <= work[j] for j in range(m)):
+                    for j in range(m):
+                        work[j] += alloc[i][j]
+                    finish[i] = True
+                    progressed = True
+            if not progressed:
+                break
+
+        return [proc_ids[i] for i in range(n) if not finish[i]]
+
     def detect_deadlock(self) -> DeadlockResult:
         """
-        Full deadlock detection: build edges, find cycles, recommend victim.
+        Full deadlock detection:
+          - Builds RAG/WFG edges and runs DFS cycle detection.
+          - Runs multiple-instance matrix reduction when resources have >1 instances
+            (since a cycle is necessary but not sufficient for multi-instance deadlock).
+          - Recommends the optimal eligible victim using declared recovery priority.
         """
         self.build_edges()
         cycles = self.detect_cycles()
+        is_multi_instance = any(r.total_instances > 1 for r in self.resources.values())
+        multi_deadlocked = self.detect_multi_instance_deadlock()
 
         involved_procs: Set[str] = set()
         involved_res: Set[str] = set()
-        for cycle in cycles:
-            for pid in cycle:
-                involved_procs.add(pid)
-                proc = self.processes.get(pid)
-                if proc:
-                    for res_id in proc.requesting:
+
+        if is_multi_instance:
+            # Multi-instance reduction is definitive when any resource has >1 instances
+            involved_procs.update(multi_deadlocked)
+            has_deadlock = len(multi_deadlocked) > 0
+            detection_method = "multi_instance_reduction+dfs"
+            # Filter cycles to those whose members are actually deadlocked
+            cycles = [c for c in cycles if all(pid in involved_procs for pid in c)]
+        else:
+            for cycle in cycles:
+                for pid in cycle:
+                    involved_procs.add(pid)
+            has_deadlock = len(cycles) > 0
+            detection_method = "dfs_wfg"
+
+        for pid in involved_procs:
+            proc = self.processes.get(pid)
+            if proc:
+                for res_id, cnt in proc.requesting.items():
+                    if cnt > 0:
                         involved_res.add(res_id)
-                    for res_id in proc.allocated:
+                for res_id, cnt in proc.allocated.items():
+                    if cnt > 0:
                         involved_res.add(res_id)
 
         victim = None
         victim_reason = ""
-        if cycles:
+        if has_deadlock and involved_procs:
             victim, victim_reason = self._select_victim(involved_procs)
 
         return DeadlockResult(
-            has_deadlock=len(cycles) > 0,
+            has_deadlock=has_deadlock,
             cycles=cycles,
             involved_processes=involved_procs,
             involved_resources=involved_res,
             recommended_victim=victim,
             victim_reason=victim_reason,
             timestamp=time.time(),
+            detection_method=detection_method,
+            is_multi_instance_graph=is_multi_instance,
+            multi_instance_deadlocked=multi_deadlocked,
         )
 
     def _select_victim(self, involved: Set[str]) -> Tuple[Optional[str], str]:
         """
-        Select optimal victim for deadlock resolution.
+        Select optimal eligible victim for deadlock resolution.
 
-        Cost function considers (lower cost = better victim):
-          - Lower priority processes preferred
-          - Shorter runtime preferred
-          - Less memory consumption preferred
+        When nodes declare explicit application `recovery_priority` (1 = lowest,
+        distinct from Windows OS scheduling priority), strictly select the eligible
+        worker with the lowest recovery_priority (ties broken by shorter runtime,
+        then lower memory). Otherwise fall back to the legacy weighted cost formula
+        for static educational scenarios.
         """
+        eligible = [
+            self.processes[pid]
+            for pid in involved
+            if pid in self.processes and self.processes[pid].eligible_for_victim
+        ]
+        if not eligible:
+            return None, "No eligible worker victim found in deadlock cycle."
+
+        uses_recovery_priority = any(p.recovery_priority is not None for p in eligible)
+
+        if uses_recovery_priority:
+            eligible.sort(
+                key=lambda p: (
+                    p.recovery_priority if p.recovery_priority is not None else p.priority,
+                    p.runtime_seconds,
+                    p.memory_mb,
+                    p.id,
+                )
+            )
+            chosen = eligible[0]
+            rec_pri = chosen.recovery_priority if chosen.recovery_priority is not None else chosen.priority
+            pid_display = f"OS PID {chosen.pid}" if chosen.pid is not None else chosen.id
+            reason = (
+                f"Selected '{chosen.name}' ({pid_display}) as lowest recovery-priority eligible victim: "
+                f"recovery_priority={rec_pri} (1=lowest, distinct from OS scheduling priority "
+                f"'{chosen.os_scheduling_priority or 'normal'}'), "
+                f"runtime={chosen.runtime_seconds:.1f}s, memory={chosen.memory_mb:.1f}MB"
+            )
+            return chosen.id, reason
+
         best_victim = None
         best_cost = float("inf")
         reason = ""
 
-        for pid in involved:
-            proc = self.processes.get(pid)
-            if not proc:
-                continue
-
-            # Cost = priority * 10 + runtime + memory/100
+        for proc in eligible:
             cost = (proc.priority * 10) + proc.runtime_seconds + (proc.memory_mb / 100)
-
             if cost < best_cost:
                 best_cost = cost
-                best_victim = pid
+                best_victim = proc.id
                 reason = (
-                    f"Selected '{proc.name}' (PID {pid}) as victim: "
+                    f"Selected '{proc.name}' (PID {proc.id}) as victim: "
                     f"priority={proc.priority}, runtime={proc.runtime_seconds:.1f}s, "
                     f"memory={proc.memory_mb:.1f}MB, cost={cost:.2f}"
                 )
@@ -270,16 +377,25 @@ class WaitForGraph:
         """Return graph data for visualization."""
         nodes = []
         for pid, proc in self.processes.items():
+            rec_pri = proc.recovery_priority if proc.recovery_priority is not None else proc.priority
             nodes.append({
                 "id": pid,
                 "name": proc.name,
                 "label": proc.name,
                 "type": "process",
-                "priority": proc.priority,
+                "priority": rec_pri,
+                "recovery_priority": rec_pri,
+                "os_scheduling_priority": proc.os_scheduling_priority,
+                "os_pid": proc.pid,
+                "tid": proc.tid,
+                "role": proc.role,
+                "state": proc.state,
+                "eligible_for_victim": proc.eligible_for_victim,
                 "runtime_seconds": proc.runtime_seconds,
                 "memory_mb": proc.memory_mb,
                 "allocated": proc.allocated,
                 "requesting": proc.requesting,
+                "max_claim": proc.max_claim,
             })
 
         for rid, res in self.resources.items():
@@ -374,16 +490,32 @@ class BankersAlgorithm:
         n = len(processes)
         m = len(resources)
 
-        # Validate dimensions
-        assert len(available) == m, f"Available vector length {len(available)} != {m}"
-        assert len(max_matrix) == n, f"Max matrix rows {len(max_matrix)} != {n}"
-        assert len(allocation_matrix) == n, f"Allocation matrix rows {len(allocation_matrix)} != {n}"
+        # Validate dimensions and matrix invariants
+        if len(available) != m:
+            raise ValueError(f"Available vector length {len(available)} != {m}")
+        if len(max_matrix) != n:
+            raise ValueError(f"Max matrix rows {len(max_matrix)} != {n}")
+        if len(allocation_matrix) != n:
+            raise ValueError(f"Allocation matrix rows {len(allocation_matrix)} != {n}")
+        if any(a < 0 for a in available):
+            raise ValueError(f"Available vector cannot contain negative values: {available}")
 
         # Compute Need matrix: NEED[i][j] = MAX[i][j] - ALLOC[i][j]
         need = []
         for i in range(n):
+            if len(max_matrix[i]) != m or len(allocation_matrix[i]) != m:
+                raise ValueError(f"Row {i} length mismatch: expected {m} resource columns")
             row = []
             for j in range(m):
+                if max_matrix[i][j] < 0 or allocation_matrix[i][j] < 0:
+                    raise ValueError(
+                        f"Negative matrix entry at process={processes[i]}, resource={resources[j]}"
+                    )
+                if allocation_matrix[i][j] > max_matrix[i][j]:
+                    raise ValueError(
+                        f"Allocation ({allocation_matrix[i][j]}) exceeds declared Max claim "
+                        f"({max_matrix[i][j]}) for process={processes[i]}, resource={resources[j]}"
+                    )
                 row.append(max_matrix[i][j] - allocation_matrix[i][j])
             need.append(row)
 
@@ -422,6 +554,7 @@ class BankersAlgorithm:
             process_names=processes,
             resource_names=resources,
             timestamp=time.time(),
+            finish_flags=list(finish),
         )
 
     def simulate_request(
